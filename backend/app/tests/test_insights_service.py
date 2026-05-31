@@ -1,8 +1,8 @@
-from app.schemas.insights import InsightPageContext, InsightPlan, InsightPlanRequest, InsightResultRow, InsightValidationResult
+from app.schemas.insights import InsightChatMessage, InsightPageContext, InsightPlan, InsightPlanRequest, InsightResultRow, InsightValidationResult
 from app.schemas.review_queue import ReviewQueueItem, ReviewerBrief
 from app.schemas.risk import RiskSignal
 from app.config import Settings
-from app.services import insights_service
+from app.services import insights_service, sql_query_service
 from app.services import insight_artifact_service
 from app.services.insight_artifact_service import load_stored_insight_result
 from app.tools import spend_tools
@@ -23,6 +23,14 @@ def test_compare_engineering_vs_sales_plan_is_valid():
     assert response.validation.valid is True
     assert response.plan.tool == "spend.compare"
     assert response.plan.filters["department"] == ["Engineering", "Sales"]
+
+
+def test_compare_engineer_vs_finance_teams_uses_department_aliases():
+    response = insights_service.create_insight_plan(InsightPlanRequest(question="What are spendings of Engineer vs Finance Teams"))
+
+    assert response.validation.valid is True
+    assert response.plan.tool == "spend.compare"
+    assert response.plan.filters["department"] == ["Engineering", "Finance"]
 
 
 def test_marketing_against_engineering_by_category_uses_compare_plan():
@@ -69,6 +77,125 @@ def test_last_quarter_chart_plan_uses_monthly_grouping():
     assert response.plan.filters["date_start"] == "2026-01-01"
     assert response.plan.filters["date_end"] == "2026-03-31"
     assert response.plan.visualization == "line"
+
+
+def test_last_quarter_department_question_defaults_to_chart():
+    response = insights_service.create_insight_plan(
+        InsightPlanRequest(question="What are marketing team's spending last quarter")
+    )
+
+    assert response.validation.valid is True
+    assert response.plan.tool == "spend.groupBy"
+    assert response.plan.mode == "chart"
+    assert response.plan.group_by == ["month"]
+    assert response.plan.visualization == "line"
+
+
+def test_ai_planner_is_tried_for_open_ended_spend_questions(monkeypatch):
+    class FakePlanner:
+        def create_plan(self, **_kwargs):
+            return InsightPlan(
+                intent="validated_sql_department_trend",
+                mode="chart",
+                tool="spend.sqlQuery",
+                filters={"department": "Engineering", "date_start": "2026-01-01", "date_end": "2026-03-31"},
+                group_by=["month"],
+                metrics=["sum_amount_cad", "transaction_count"],
+                sort=[{"field": "month", "direction": "asc"}],
+                limit=24,
+                visualization="line",
+                sql_statement=(
+                    "select to_char(t.transaction_date, 'YYYY-MM') as label, "
+                    "sum(t.amount_cad) as sum_amount_cad, count(*) as transaction_count "
+                    "from transactions t "
+                    "join departments d on d.id = t.department_id "
+                    "where d.name = 'Engineering' and t.transaction_date between date '2026-01-01' and date '2026-03-31' "
+                    "group by 1 order by 1"
+                ),
+            )
+
+    monkeypatch.setattr(insights_service, "AnthropicInsightPlannerClient", lambda: FakePlanner())
+    monkeypatch.setattr(insights_service, "_ai_planner_available", lambda: True)
+
+    response = insights_service.create_insight_plan(
+        InsightPlanRequest(question="What was engineering's spendings last quarter")
+    )
+
+    assert response.validation.valid is True
+    assert response.planner_source == "anthropic_structured"
+    assert response.plan.tool == "spend.sqlQuery"
+    assert response.plan.filters["department"] == "Engineering"
+    assert response.plan.filters["date_start"] == "2026-01-01"
+    assert response.plan.filters["date_end"] == "2026-03-31"
+
+
+def test_ai_planner_can_override_deterministic_followup(monkeypatch):
+    class FakePlanner:
+        def create_plan(self, **_kwargs):
+            return InsightPlan(
+                intent="validated_sql_department_trend",
+                mode="chart",
+                tool="spend.sqlQuery",
+                filters={"department": "Engineering", "date_start": "2025-12-01", "date_end": "2026-05-31"},
+                group_by=["month"],
+                metrics=["sum_amount_cad", "transaction_count"],
+                sort=[{"field": "month", "direction": "asc"}],
+                limit=24,
+                visualization="line",
+                sql_statement=(
+                    "select to_char(t.transaction_date, 'YYYY-MM') as label, "
+                    "sum(t.amount_cad) as sum_amount_cad, count(*) as transaction_count "
+                    "from transactions t "
+                    "join departments d on d.id = t.department_id "
+                    "where d.name = 'Engineering' and t.transaction_date between date '2025-12-01' and date '2026-05-31' "
+                    "group by 1 order by 1"
+                ),
+            )
+
+    monkeypatch.setattr(insights_service, "AnthropicInsightPlannerClient", lambda: FakePlanner())
+    monkeypatch.setattr(insights_service, "_ai_planner_available", lambda: True)
+
+    last_plan = InsightPlan(
+        intent="department_spend_trend",
+        mode="chart",
+        tool="spend.groupBy",
+        filters={"department": "Engineering", "date_start": "2026-01-01", "date_end": "2026-03-31"},
+        group_by=["month"],
+        metrics=["sum_amount_cad", "transaction_count", "avg_amount_cad"],
+        sort=[{"field": "month", "direction": "asc"}],
+        limit=24,
+        visualization="line",
+    )
+    history = [
+        InsightChatMessage(
+            role="assistant",
+            content="I plotted Engineering spend by month from January 2026 to March 2026.",
+            metadata={
+                "plan": last_plan.model_dump(mode="json"),
+                "analysis_frame": {
+                    "analysis_kind": "department_trend",
+                    "tool": "spend.groupBy",
+                    "intent": "department_spend_trend",
+                    "mode": "chart",
+                    "visualization": "line",
+                    "filters": last_plan.filters,
+                    "group_by": last_plan.group_by,
+                    "comparison_targets": [],
+                },
+            },
+        )
+    ]
+
+    response = insights_service.create_insight_plan(
+        InsightPlanRequest(question="What about past 6 months"),
+        session_messages=history,
+    )
+
+    assert response.validation.valid is True
+    assert response.planner_source == "anthropic_structured"
+    assert response.plan.tool == "spend.sqlQuery"
+    assert response.plan.filters["date_start"] == "2025-12-01"
+    assert response.plan.filters["date_end"] == "2026-05-31"
 
 
 def test_high_risk_transactions_plan_is_valid():
@@ -355,6 +482,188 @@ def test_department_trend_summary_mentions_chart_and_period(monkeypatch):
     assert "March 2026" in response.summary
 
 
+def test_chart_followup_turns_department_summary_into_time_series_chart(monkeypatch):
+    client = FakeSupabaseClient(
+        {
+            "transactions": [
+                {
+                    **transaction("txn_1", "employee_1", "department_1", "Travel", 200, "AIR CANADA"),
+                    "transaction_date": "2026-01-05",
+                },
+                {
+                    **transaction("txn_2", "employee_1", "department_1", "Travel", 340, "AIR CANADA"),
+                    "transaction_date": "2026-02-10",
+                },
+                {
+                    **transaction("txn_3", "employee_1", "department_1", "Office", 120, "AMAZON"),
+                    "transaction_date": "2026-03-12",
+                },
+            ],
+            "employees": [
+                {"id": "employee_1", "full_name": "Sarah Chen", "department_id": "department_1"},
+            ],
+            "departments": [
+                {"id": "department_1", "name": "Marketing"},
+            ],
+            "policy_checks": [],
+            "risk_scores": [],
+            "chat_sessions": [],
+            "chat_messages": [],
+        }
+    )
+    monkeypatch.setattr(spend_tools, "get_supabase_client", lambda: client)
+    monkeypatch.setattr(insights_service, "get_supabase_client", lambda: client)
+
+    first = insights_service.query_insights(
+        type(
+            "Request",
+            (),
+            {
+                "question": "Can you tell me how much Marketing team spent last quarter?",
+                "mode": None,
+                "session_id": None,
+            },
+        )()
+    )
+    second = insights_service.query_insights(
+        type(
+            "Request",
+            (),
+            {
+                "question": "Can you generate me some charts perhaps?",
+                "mode": None,
+                "session_id": first.session_id,
+            },
+        )()
+    )
+
+    assert second.plan.tool == "spend.groupBy"
+    assert second.plan.group_by == ["month"]
+    assert second.plan.visualization == "line"
+    assert second.summary.startswith("I plotted Marketing spend by month")
+
+
+def test_compare_followup_uses_previous_department_and_returns_chart(monkeypatch):
+    client = FakeSupabaseClient(
+        {
+            "transactions": [
+                {
+                    **transaction("txn_1", "employee_1", "department_1", "Travel", 300, "AIR CANADA"),
+                    "transaction_date": "2026-01-05",
+                },
+                {
+                    **transaction("txn_2", "employee_1", "department_1", "Travel", 360, "AIR CANADA"),
+                    "transaction_date": "2026-02-10",
+                },
+                {
+                    **transaction("txn_3", "employee_2", "department_2", "Software", 310, "ATLASSIAN"),
+                    "transaction_date": "2026-01-09",
+                },
+                {
+                    **transaction("txn_4", "employee_2", "department_2", "Software", 290, "ATLASSIAN"),
+                    "transaction_date": "2026-03-18",
+                },
+            ],
+            "employees": [
+                {"id": "employee_1", "full_name": "Sarah Chen", "department_id": "department_1"},
+                {"id": "employee_2", "full_name": "Ava Cole", "department_id": "department_2"},
+            ],
+            "departments": [
+                {"id": "department_1", "name": "Marketing"},
+                {"id": "department_2", "name": "Engineering"},
+            ],
+            "policy_checks": [],
+            "risk_scores": [],
+            "chat_sessions": [],
+            "chat_messages": [],
+        }
+    )
+    monkeypatch.setattr(spend_tools, "get_supabase_client", lambda: client)
+    monkeypatch.setattr(insights_service, "get_supabase_client", lambda: client)
+
+    first = insights_service.query_insights(
+        type("Request", (), {"question": "What are marketing team's spending last quarter", "mode": None, "session_id": None})()
+    )
+    second = insights_service.query_insights(
+        type(
+            "Request",
+            (),
+            {
+                "question": "How does this compare to Engineering spendings for last quarter?",
+                "mode": None,
+                "session_id": first.session_id,
+            },
+        )()
+    )
+
+    assert second.plan.tool == "spend.compare"
+    assert second.plan.mode == "chart"
+    assert second.plan.filters["department"] == ["Marketing", "Engineering"]
+    assert second.plan.group_by == ["month"]
+    assert second.plan.visualization == "line"
+
+
+def test_both_on_chart_followup_keeps_department_comparison(monkeypatch):
+    client = FakeSupabaseClient(
+        {
+            "transactions": [
+                {
+                    **transaction("txn_1", "employee_1", "department_1", "Travel", 300, "AIR CANADA"),
+                    "transaction_date": "2026-01-05",
+                },
+                {
+                    **transaction("txn_2", "employee_2", "department_2", "Software", 310, "ATLASSIAN"),
+                    "transaction_date": "2026-01-09",
+                },
+            ],
+            "employees": [
+                {"id": "employee_1", "full_name": "Sarah Chen", "department_id": "department_1"},
+                {"id": "employee_2", "full_name": "Ava Cole", "department_id": "department_2"},
+            ],
+            "departments": [
+                {"id": "department_1", "name": "Marketing"},
+                {"id": "department_2", "name": "Engineering"},
+            ],
+            "policy_checks": [],
+            "risk_scores": [],
+            "chat_sessions": [],
+            "chat_messages": [],
+        }
+    )
+    monkeypatch.setattr(spend_tools, "get_supabase_client", lambda: client)
+    monkeypatch.setattr(insights_service, "get_supabase_client", lambda: client)
+
+    first = insights_service.query_insights(
+        type("Request", (), {"question": "What are marketing team's spending last quarter", "mode": None, "session_id": None})()
+    )
+    second = insights_service.query_insights(
+        type(
+            "Request",
+            (),
+            {
+                "question": "How does this compare to Engineering spendings for last quarter?",
+                "mode": None,
+                "session_id": first.session_id,
+            },
+        )()
+    )
+    third = insights_service.query_insights(
+        type(
+            "Request",
+            (),
+            {
+                "question": "Can you put them both on a chart so I can see their differences",
+                "mode": None,
+                "session_id": second.session_id,
+            },
+        )()
+    )
+
+    assert third.plan.tool == "spend.compare"
+    assert third.plan.filters["department"] == ["Marketing", "Engineering"]
+    assert third.plan.visualization == "line"
+
+
 def test_review_queue_query_and_followup_feel_conversational(monkeypatch):
     client = FakeSupabaseClient(
         {
@@ -567,6 +876,48 @@ def test_page_explanation_question_prefers_review_context(monkeypatch):
     assert response.summary.startswith("You're on the Review page.")
     assert "policy findings, risk signals, and reviewer next steps" in response.summary
     assert "ROSENBERG TR-LI at CAD 413.53" in response.summary
+
+
+def test_page_explanation_question_on_talk_to_data_uses_page_context(monkeypatch):
+    client = FakeSupabaseClient(
+        {
+            "transactions": [],
+            "employees": [],
+            "departments": [],
+            "policy_checks": [],
+            "risk_scores": [],
+            "chat_sessions": [],
+            "chat_messages": [],
+        }
+    )
+    monkeypatch.setattr(insights_service, "get_supabase_client", lambda: client)
+    monkeypatch.setattr(insights_service, "default_insight_response_client", lambda: None)
+
+    response = insights_service.query_insights(
+        type(
+            "Request",
+            (),
+            {
+                "question": "What page am I on? What is being described",
+                "mode": None,
+                "session_id": None,
+                "page_context": InsightPageContext(
+                    page="Talk to Data",
+                    route="talkToData",
+                    payload={
+                        "summary": "You are in Poly's Ask workspace for finance questions, chart previews, result rows, and exports.",
+                        "details": {
+                            "quick_summary": "Ask from the conversation panel and inspect the latest result, chart preview, and exports on the right."
+                        },
+                    },
+                ),
+            },
+        )()
+    )
+
+    assert response.plan.tool == "context.globalSummary"
+    assert response.summary.startswith("You're on the Talk to Data page.")
+    assert "Ask workspace" in response.summary
 
 
 def test_query_insights_applies_page_context_filters(monkeypatch):
@@ -826,6 +1177,62 @@ def test_query_insights_answers_from_global_context_summary(monkeypatch):
     assert response.metadata["context_scope"] == ["page_context", "global_summaries", "session_memory"]
 
 
+def test_spend_question_on_reports_page_ignores_page_narration_ai(monkeypatch):
+    client = FakeSupabaseClient(
+        {
+            "transactions": [
+                transaction("txn_1", "employee_1", "department_1", "Travel", 200, "AIR CANADA"),
+                transaction("txn_2", "employee_2", "department_2", "Software", 500, "ATLASSIAN"),
+                transaction("txn_3", "employee_2", "department_2", "Travel", 300, "UBER"),
+                transaction("txn_4", "employee_3", "department_3", "Office", 250, "STAPLES"),
+            ],
+            "employees": [
+                {"id": "employee_1", "full_name": "Sarah Chen", "department_id": "department_1"},
+                {"id": "employee_2", "full_name": "Ava Cole", "department_id": "department_2"},
+                {"id": "employee_3", "full_name": "Jordan Lee", "department_id": "department_3"},
+            ],
+            "departments": [
+                {"id": "department_1", "name": "Marketing"},
+                {"id": "department_2", "name": "Engineering"},
+                {"id": "department_3", "name": "Finance"},
+            ],
+            "policy_checks": [],
+            "risk_scores": [],
+            "chat_sessions": [],
+            "chat_messages": [],
+        }
+    )
+    monkeypatch.setattr(spend_tools, "get_supabase_client", lambda: client)
+    monkeypatch.setattr(insights_service, "get_supabase_client", lambda: client)
+
+    class FakeResponseClient:
+        def compose_answer(self, _facts):
+            return "This should not replace a spend comparison."
+
+    monkeypatch.setattr(insights_service, "default_insight_response_client", lambda: FakeResponseClient())
+
+    response = insights_service.query_insights(
+        type(
+            "Request",
+            (),
+            {
+                "question": "What are spendings of Engineer vs Finance Teams",
+                "mode": None,
+                "session_id": None,
+                "page_context": InsightPageContext(
+                    page="Reports",
+                    route="reports",
+                    payload={"summary": "Generated reports for Amelia Stone and Sarah Chen", "artifacts": [{"type": "brief", "label": "Expense report brief"}]},
+                ),
+            },
+        )()
+    )
+
+    assert response.plan.tool == "spend.compare"
+    assert response.summary.startswith("Compared Engineering against Finance")
+    assert "Reports page" not in response.summary
+
+
 def test_query_insights_executes_validated_sql_plan(monkeypatch):
     client = FakeSupabaseClient(
         {
@@ -898,6 +1305,125 @@ def test_query_insights_executes_validated_sql_plan(monkeypatch):
     assert response.metadata["generated_sql"] == "select department as label, 10 as sum_amount_cad"
     assert response.metadata["sql_validation"]["approved"] is True
     assert "Returned 2 row(s)" in response.summary
+
+
+def test_sql_result_normalization_uses_canonical_amount_aliases():
+    row = sql_query_service.row_to_insight_result(
+        {"department_name": "Engineering", "total_spend": 100952.53, "count": 239},
+        ["department_name", "total_spend", "count"],
+        0,
+    )
+
+    summary = insights_service.summarize_sql_result(
+        InsightPlan(
+            intent="validated_sql_department_spend",
+            mode="answer",
+            tool="spend.sqlQuery",
+            limit=10,
+            visualization="table",
+        ),
+        [row],
+        {"returned_count": 1},
+    )
+
+    assert row.label == "Engineering"
+    assert row.values["sum_amount_cad"] == 100952.53
+    assert row.values["transaction_count"] == 239
+    assert summary == "Engineering totaled CAD 100,952.53 across 239 transaction(s)."
+
+
+def test_query_insights_falls_back_when_sql_result_misses_spend_metric(monkeypatch):
+    client = FakeSupabaseClient(
+        {
+            "transactions": [],
+            "employees": [],
+            "departments": [],
+            "policy_checks": [],
+            "risk_scores": [],
+            "chat_sessions": [],
+            "chat_messages": [],
+        }
+    )
+    monkeypatch.setattr(insights_service, "get_supabase_client", lambda: client)
+    monkeypatch.setattr(
+        insights_service,
+        "create_insight_plan",
+        lambda request, session_messages=None, page_context=None, ask_context=None: type(
+            "PlanResponse",
+            (),
+            {
+                "question": request.question,
+                "plan": InsightPlan(
+                    intent="validated_sql_department_spend",
+                    mode="answer",
+                    tool="spend.sqlQuery",
+                    limit=10,
+                    visualization="table",
+                    filters={"department": "Engineering", "date_start": "2026-01-01", "date_end": "2026-03-31"},
+                    sql_statement="select 'Engineering' as label, 239 as transaction_count",
+                ),
+                "critic": InsightValidationResult(valid=True),
+                "validation": InsightValidationResult(valid=True),
+                "planner_source": "anthropic_structured",
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        insights_service.sql_query_service,
+        "validate_and_prepare_sql",
+        lambda **_kwargs: (
+            "select 'Engineering' as label, 239 as transaction_count",
+            {
+                "generated_sql": "select 'Engineering' as label, 239 as transaction_count",
+                "executed_sql": "select 'Engineering' as label, 239 as transaction_count",
+                "sql_validation": {"approved": True, "reason": "read-only"},
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        insights_service.sql_query_service,
+        "execute_read_only_sql",
+        lambda _sql, _limit: (
+            [InsightResultRow(label="Engineering", values={"transaction_count": 239})],
+            {"record_count": 1, "returned_count": 1, "sql_columns": ["label", "transaction_count"], "sql_limit": 10},
+        ),
+    )
+    monkeypatch.setattr(
+        insights_service,
+        "deterministic_plan",
+        lambda question, mode=None, last_plan=None, last_analysis_frame=None: InsightPlan(
+            intent="department_spend_trend",
+            mode="chart",
+            tool="spend.groupBy",
+            filters={"department": "Engineering", "date_start": "2026-01-01", "date_end": "2026-03-31"},
+            group_by=["month"],
+            metrics=["sum_amount_cad", "transaction_count", "avg_amount_cad"],
+            sort=[{"field": "month", "direction": "asc"}],
+            limit=24,
+            visualization="line",
+        ),
+    )
+    monkeypatch.setattr(
+        insights_service,
+        "execute_insight_tool",
+        lambda plan, question=None, history=None: (
+            [
+                InsightResultRow(label="2026-01", values={"sum_amount_cad": 30984.71, "transaction_count": 74, "avg_amount_cad": 418.71}),
+                InsightResultRow(label="2026-02", values={"sum_amount_cad": 47197.75, "transaction_count": 93, "avg_amount_cad": 507.5}),
+                InsightResultRow(label="2026-03", values={"sum_amount_cad": 22770.07, "transaction_count": 72, "avg_amount_cad": 316.25}),
+            ],
+            {"record_count": 3, "returned_count": 3},
+            [],
+        ),
+    )
+
+    response = insights_service.query_insights(
+        type("Request", (), {"question": "What was engineering's spending last quarter", "mode": None, "session_id": None, "page_context": None})()
+    )
+
+    assert response.plan.tool == "spend.groupBy"
+    assert response.planner_source == "claude_fallback"
+    assert response.summary.startswith("I plotted Engineering spend by month")
 
 
 def test_query_insights_reuses_saved_session_context(monkeypatch):
@@ -1028,6 +1554,7 @@ def test_policy_clause_lookup_returns_citations(monkeypatch):
 
 def test_ai_planner_uses_anthropic_for_followup_questions(monkeypatch):
     monkeypatch.setattr(insights_service, "maybe_apply_followup_plan", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(insights_service, "_ai_planner_available", lambda: True)
     monkeypatch.setattr(
         insights_service.AnthropicInsightPlannerClient,
         "create_plan",

@@ -59,6 +59,10 @@ class ReviewQueueItem(BaseModel):
     ai_context: str | None = None
     reviewer_brief: ReviewerBrief | None = None
     next_action: str = "No action required."
+    review_group_key: str | None = None
+    review_group_size: int = 1
+    review_group_total_amount_cad: float = 0
+    review_group_transaction_ids: list[str] = Field(default_factory=list)
     generated_at: str | None = None
 
 

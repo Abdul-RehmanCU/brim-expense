@@ -40,9 +40,9 @@ export function AssistantDock({ onNavigate }: AssistantDockProps) {
       <button
         type="button"
         onClick={openDock}
-        className="fixed right-4 bottom-4 z-40 inline-flex items-center gap-3 rounded-full border border-border/70 bg-card/92 px-4 py-3 text-left shadow-2xl shadow-black/25 backdrop-blur-xl transition hover:border-primary/40 hover:shadow-primary/10 lg:right-6 lg:bottom-6"
+        className="assistant-bubble-enter fixed right-4 bottom-4 z-40 inline-flex items-center gap-3 rounded-full border border-border/70 bg-card/92 px-4 py-3 text-left shadow-2xl shadow-black/25 backdrop-blur-xl transition hover:border-primary/40 hover:shadow-primary/10 lg:right-6 lg:bottom-6"
       >
-        <PolyAvatar className="size-10 rounded-full ring-2 ring-primary/15" />
+        <PolyAvatar className="assistant-avatar-reveal size-10 rounded-full ring-2 ring-primary/15" />
         <span className="hidden min-w-0 lg:block">
           <span className="block text-sm font-semibold text-foreground">Ask Poly</span>
           <span className="block max-w-52 truncate text-xs text-muted-foreground">
@@ -59,14 +59,14 @@ export function AssistantDock({ onNavigate }: AssistantDockProps) {
   return (
     <section
       className={cn(
-        'fixed right-4 bottom-4 z-40 flex flex-col overflow-hidden rounded-3xl border border-border/70 bg-card/96 shadow-2xl shadow-black/30 backdrop-blur-2xl transition-all lg:right-6 lg:bottom-6',
+        'assistant-dock-enter fixed right-4 bottom-4 z-40 flex flex-col overflow-hidden rounded-3xl border border-border/70 bg-card/96 shadow-2xl shadow-black/30 backdrop-blur-2xl transition-all lg:right-6 lg:bottom-6',
         isExpanded ? 'h-[min(84vh,56rem)] w-[min(calc(100vw-2rem),58rem)]' : 'h-[min(78vh,44rem)] w-[min(calc(100vw-2rem),32rem)]',
       )}
     >
       <header className="flex items-start justify-between gap-4 border-b border-border/70 px-5 py-4">
         <div className="min-w-0">
           <div className="flex items-center gap-3">
-            <PolyAvatar className="size-11 rounded-2xl ring-2 ring-primary/15" />
+            <PolyAvatar className="assistant-avatar-reveal size-11 rounded-2xl ring-2 ring-primary/15" />
             <div className="min-w-0">
               <p className="text-base font-semibold text-foreground">Poly</p>
               <p className="truncate text-sm text-muted-foreground">

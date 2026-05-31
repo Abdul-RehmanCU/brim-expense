@@ -48,6 +48,22 @@ export function buildInsightPreviewChartSpec(result: InsightQueryResponse): Insi
     return null
   }
 
+  if (result.rows.length === 1 && isChartPreferred(result)) {
+    const row = result.rows[0]
+    return {
+      kind: result.visualization === 'line' ? 'line' : 'bar',
+      data: [
+        {
+          label: row.label,
+          [primaryMetric]: toNumber(row.values[primaryMetric]),
+        },
+      ],
+      series: [{ key: primaryMetric, label: formatColumn(primaryMetric) }],
+      xKey: 'label',
+      valueFormatter: primaryMetric.includes('amount') ? 'currency' : 'number',
+    }
+  }
+
   if (result.rows.length === 1) {
     const row = result.rows[0]
     return {
@@ -70,6 +86,10 @@ export function buildInsightPreviewChartSpec(result: InsightQueryResponse): Insi
     xKey: 'label',
     valueFormatter: primaryMetric.includes('amount') ? 'currency' : 'number',
   }
+}
+
+function isChartPreferred(result: InsightQueryResponse) {
+  return result.plan.mode === 'chart' || result.visualization === 'bar' || result.visualization === 'line'
 }
 
 function buildComparisonChartSpec(result: InsightQueryResponse): InsightPreviewChartSpec | null {

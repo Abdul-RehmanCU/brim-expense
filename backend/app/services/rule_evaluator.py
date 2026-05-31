@@ -115,6 +115,29 @@ EXPENSE_EVIDENCE_TERMS = {
     "receipt",
     "supporting document",
 }
+ALIASED_CATEGORY_FIELDS = {
+    "business_category",
+    "category",
+    "normalized_category",
+    "policy_category",
+}
+ALIASED_MERCHANT_FIELDS = {
+    "normalized_merchant_family",
+}
+NON_GATING_WORKFLOW_TAGS = {
+    "approval_required",
+    "preapproval_required",
+    "receipt_required",
+    "context_required",
+    "documentation_required",
+    "duplicate_review",
+    "split_transaction_review",
+    "data_quality_review",
+    "pattern_review",
+    "meal_cap_review",
+    "telecom_review",
+    "exclude_from_expense_workflow",
+}
 
 
 class RuleValidationError(ValueError):
@@ -290,8 +313,18 @@ def applies_to_matches(applies_to: dict[str, Any], context: PolicyContext) -> bo
             if not values_overlap(expected_values, context_eligibility_values(context)):
                 return False
             continue
+        if key in {"employee_roles", "employee_role"}:
+            if not any(text_values_match(context_value(context, "employee_role"), value) for value in expected_values):
+                return False
+            continue
+        if key in {"department_names", "department_name", "departments"}:
+            if not any(text_values_match(context_value(context, "department_name"), value) for value in expected_values):
+                return False
+            continue
         if key in {"workflow_tags", "workflow", "transaction_types", "transaction_type"}:
-            if not values_overlap(expected_values, context_workflow_values(context)):
+            normalized_non_gating_tags = {normalize_token(tag) for tag in NON_GATING_WORKFLOW_TAGS}
+            gating_values = [value for value in expected_values if normalize_token(value) not in normalized_non_gating_tags]
+            if gating_values and not values_overlap(gating_values, context_workflow_values(context)):
                 return False
             continue
 
@@ -309,9 +342,20 @@ def condition_matches(condition: dict[str, Any], context: PolicyContext, thresho
     if "not" in condition:
         return not condition_matches(condition["not"], context, thresholds)
 
-    actual = context_value(context, str(condition["field"]))
+    field_name = str(condition["field"])
+    actual = context_value(context, field_name)
     operator = condition["operator"]
     expected = resolve_value(condition.get("value"), context, thresholds)
+
+    if field_uses_alias_overlap(field_name):
+        if operator == "eq":
+            return aliased_values_match(actual, expected)
+        if operator == "neq":
+            return not aliased_values_match(actual, expected)
+        if operator == "in":
+            return any(aliased_values_match(actual, candidate) for candidate in expected)
+        if operator == "not_in":
+            return all(not aliased_values_match(actual, candidate) for candidate in expected)
 
     if operator == "eq":
         return actual == expected
@@ -422,17 +466,43 @@ def normalize_token(value: Any) -> str:
     return " ".join(str(value or "").replace("/", " ").replace("-", " ").replace("_", " ").lower().split())
 
 
-def normalized_value_set(values: list[Any]) -> set[str]:
-    result = {normalize_token(value) for value in values if normalize_token(value)}
-    for value in list(result):
-        result.update(category_family_tokens(value))
-    return result
+def field_uses_alias_overlap(field_name: str) -> bool:
+    return field_name in ALIASED_CATEGORY_FIELDS or field_name in ALIASED_MERCHANT_FIELDS
+
+
+def aliased_values_match(actual: Any, expected: Any) -> bool:
+    if actual in (None, "") or expected in (None, ""):
+        return actual == expected
+    return values_overlap([expected], [actual])
+
+
+def text_values_match(actual: Any, expected: Any) -> bool:
+    actual_text = normalize_token(actual)
+    expected_text = normalize_token(expected)
+    if not actual_text or not expected_text:
+        return actual == expected
+    return actual_text == expected_text or expected_text in actual_text or actual_text in expected_text
 
 
 def values_overlap(expected_values: list[str], actual_values: list[Any]) -> bool:
-    expected = normalized_value_set(expected_values)
-    actual = normalized_value_set(actual_values)
-    return bool(expected & actual)
+    normalized_expected = [normalize_token(value) for value in expected_values if normalize_token(value)]
+    normalized_actual = [normalize_token(value) for value in actual_values if normalize_token(value)]
+
+    if not normalized_expected or not normalized_actual:
+        return False
+
+    if any(
+        text_values_match(actual_value, expected_value)
+        for expected_value in normalized_expected
+        for actual_value in normalized_actual
+    ):
+        return True
+
+    actual_category_families: set[str] = set()
+    for actual_value in normalized_actual:
+        actual_category_families.update(category_family_tokens(actual_value))
+
+    return bool(set(normalized_expected) & actual_category_families)
 
 
 def context_category_values(context: PolicyContext) -> list[Any]:
@@ -490,7 +560,7 @@ def context_eligibility_tags(context: PolicyContext) -> list[str]:
     if context.requires_finance_review:
         tags.append("finance_review")
     if not context.skips_normal_expense_rules:
-        tags.append("normal_expense")
+        tags.extend(["normal_expense", "expense", "reimbursable"])
     return tags
 
 

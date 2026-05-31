@@ -1,11 +1,8 @@
 import {
-  BadgeCheck,
-  CircleDashed,
   Clock3,
   CheckCircle2,
   FileCheck2,
   Info,
-  ReceiptText,
   RefreshCw,
   Send,
   ShieldAlert,
@@ -13,7 +10,7 @@ import {
   UserRound,
   XCircle,
 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { PageScaffold } from '@/components/layout/PageScaffold'
 import { Button } from '@/components/ui/button'
@@ -37,8 +34,26 @@ const activeApprovalStatuses = new Set<ApprovalStatus>(['draft', 'requested'])
 const approvalsPageSize = 25
 const approvalCandidatesPageSize = 25
 
+type ReviewApprovalGroup = {
+  key: string
+  items: ReviewQueueItem[]
+  representative: ReviewQueueItem
+  totalAmount: number
+  transactionIds: string[]
+  priority: number
+}
+
+type SavedApprovalGroup = {
+  key: string
+  items: ApprovalRequestItem[]
+  representative: ApprovalRequestItem
+  totalAmount: number
+  transactionIds: string[]
+}
+
 export function ApprovalsPage() {
   const { locale, t } = useUiPreferences()
+  const detailPanelRef = useRef<HTMLElement | null>(null)
   const linkedApprovalId = useMemo(() => new URLSearchParams(window.location.search).get('approval'), [])
   const [reviewItems, setReviewItems] = useState<ReviewQueueItem[]>([])
   const [approvals, setApprovals] = useState<ApprovalRequestItem[]>([])
@@ -63,21 +78,24 @@ export function ApprovalsPage() {
     [locale],
   )
   const actionableReviewItems = useMemo(() => reviewItems.filter(isApprovalCandidate), [reviewItems])
+  const actionableReviewGroups = useMemo(() => groupReviewApprovalCandidates(actionableReviewItems), [actionableReviewItems])
   const activeApprovals = useMemo(() => approvals.filter((approval) => activeApprovalStatuses.has(approval.status)), [approvals])
-  const decidedApprovals = approvals.length - activeApprovals.length
-  const requestedApprovals = useMemo(() => approvals.filter((approval) => approval.status === 'requested').length, [approvals])
+  const savedApprovalGroups = useMemo(() => groupSavedApprovals(approvals), [approvals])
+  const activeApprovalGroups = useMemo(() => groupSavedApprovals(activeApprovals), [activeApprovals])
+  const decidedApprovals = savedApprovalGroups.length - activeApprovalGroups.length
+  const requestedApprovals = useMemo(() => groupSavedApprovals(approvals.filter((approval) => approval.status === 'requested')).length, [approvals])
   const workflowStages = useMemo(
     () => [
       {
         label: 'Needs manager packet',
-        value: actionableReviewItems.length,
-        detail: 'Queue items still waiting to be opened',
+        value: actionableReviewGroups.length,
+        detail: 'Review clusters still waiting to be opened',
         tone: 'warn' as const,
       },
       {
         label: 'Packet assembled',
-        value: approvals.length,
-        detail: 'Approval requests now have a packet shell',
+        value: savedApprovalGroups.length,
+        detail: 'Approval clusters now have packet shells',
         tone: 'neutral' as const,
       },
       {
@@ -93,19 +111,13 @@ export function ApprovalsPage() {
         tone: 'good' as const,
       },
     ],
-    [actionableReviewItems.length, approvals.length, requestedApprovals, decidedApprovals],
-  )
-  const sarahChenActivity = useMemo(
-    () =>
-      actionableReviewItems.filter((item) => item.employee === 'Sarah Chen').length +
-      activeApprovals.filter((approval) => approval.employee_name === 'Sarah Chen').length,
-    [actionableReviewItems, activeApprovals],
+    [actionableReviewGroups.length, savedApprovalGroups.length, requestedApprovals, decidedApprovals],
   )
   const assistantContext = useMemo(
     () => ({
       routeId: 'approvals' as const,
       title: 'Approvals',
-      summary: `Managing ${activeApprovals.length} active approvals and ${actionableReviewItems.length} queue items that still need a manager.`,
+      summary: `Managing ${activeApprovalGroups.length} active approval clusters and ${actionableReviewGroups.length} queue clusters that still need a manager.`,
       filters: {
         status: statusFilter || null,
       },
@@ -133,7 +145,9 @@ export function ApprovalsPage() {
           ]
         : [],
       visibleEntities: [
-        ...activeApprovals.slice(0, 5).map((approval) => ({
+        ...activeApprovalGroups.slice(0, 5).map((group) => {
+          const approval = group.representative
+          return {
           type: 'approval_request',
           id: approval.id,
           label: approval.merchant ?? approval.employee_name ?? approval.id,
@@ -143,8 +157,10 @@ export function ApprovalsPage() {
             policy_status: approval.policy_status,
             risk_level: approval.risk_level,
           },
-        })),
-        ...actionableReviewItems.slice(0, 5).map((item) => ({
+        }}),
+        ...actionableReviewGroups.slice(0, 5).map((group) => {
+          const item = group.representative
+          return {
           type: 'review_queue_item',
           id: item.id ?? item.transaction_id,
           label: item.merchant ?? item.employee ?? item.transaction_id,
@@ -154,11 +170,11 @@ export function ApprovalsPage() {
             policy_status: item.policy_status,
             risk_level: item.risk_level,
           },
-        })),
+        }}),
       ],
       metrics: {
-        actionable: actionableReviewItems.length,
-        active: activeApprovals.length,
+        actionable: actionableReviewGroups.length,
+        active: activeApprovalGroups.length,
         decided: decidedApprovals,
       },
       availableViews: ['active approvals', 'approval candidates', 'decision detail'],
@@ -167,7 +183,7 @@ export function ApprovalsPage() {
         'What should the manager focus on here?',
       ],
     }),
-    [activeApprovals.length, actionableReviewItems.length, decidedApprovals, selectedApproval, statusFilter],
+    [activeApprovalGroups, actionableReviewGroups, decidedApprovals, selectedApproval, statusFilter],
   )
   useAssistantPageContext(assistantContext)
 
@@ -344,6 +360,21 @@ export function ApprovalsPage() {
     }
   }, [linkedApprovalId])
 
+  useEffect(() => {
+    if (!selectedApproval || !detailPanelRef.current) {
+      return
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      detailPanelRef.current?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'start',
+      })
+    })
+
+    return () => window.cancelAnimationFrame(frame)
+  }, [selectedApproval])
+
   return (
     <PageScaffold
       eyebrow={t('approvals.eyebrow')}
@@ -388,18 +419,18 @@ export function ApprovalsPage() {
         {error ? <p className="mt-3 rounded-lg border border-red-300/70 bg-red-100/70 p-3 text-sm text-red-700 dark:border-red-400/30 dark:bg-red-400/10 dark:text-red-100">{error}</p> : null}
 
         <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <MetricCard label={t('approvals.needsDecision')} value={actionableReviewItems.length} locale={locale} />
-          <MetricCard label={t('approvals.openApprovals')} value={activeApprovals.length} locale={locale} />
+          <MetricCard label={t('approvals.needsDecision')} value={actionableReviewGroups.length} locale={locale} />
+          <MetricCard label={t('approvals.openApprovals')} value={activeApprovalGroups.length} locale={locale} />
           <MetricCard label={t('approvals.decided')} value={decidedApprovals} locale={locale} />
           <MetricCard
             label={t('approvals.urgent')}
-            value={actionableReviewItems.filter((item) => item.review_level === 'high' || item.review_level === 'critical').length}
+            value={actionableReviewGroups.filter((group) => group.representative.review_level === 'high' || group.representative.review_level === 'critical').length}
             locale={locale}
           />
         </div>
 
-        <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1.4fr)_minmax(260px,0.6fr)]">
-          <div className="rounded-2xl border border-border/70 bg-background/65 p-4">
+        <div className="mt-4 flex justify-center">
+          <div className="w-full max-w-5xl rounded-2xl border border-border/70 bg-background/65 p-4">
             <div className="flex items-center gap-2">
               <Clock3 className="size-4 text-primary" aria-hidden="true" />
               <p className="text-sm font-semibold text-foreground">Workflow progression</p>
@@ -410,51 +441,43 @@ export function ApprovalsPage() {
               ))}
             </div>
           </div>
-
-          {sarahChenActivity > 0 ? (
-            <div className="panel-reveal rounded-2xl border border-primary/20 bg-primary/8 p-4">
-              <div className="flex items-start gap-3">
-                <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-primary/14 text-primary">
-                  <Sparkles className="size-4" aria-hidden="true" />
-                </span>
-                <div>
-                  <p className="text-sm font-semibold text-foreground">Sarah Chen lane is active</p>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    {sarahChenActivity.toLocaleString(locale)} approval {sarahChenActivity === 1 ? 'packet is' : 'packets are'} currently tied to Sarah Chen.
-                  </p>
-                </div>
-              </div>
-            </div>
-          ) : null}
         </div>
       </section>
 
-      <section className="grid gap-4 xl:grid-cols-[minmax(0,1.05fr)_minmax(360px,0.95fr)]">
-        <section className="surface-panel overflow-hidden">
+      <section className="grid gap-4 xl:items-start xl:grid-cols-[minmax(0,1.05fr)_minmax(360px,0.95fr)]">
+        <section className="surface-panel self-start overflow-hidden">
           <div className="border-b border-border/70 p-4">
             <p className="text-sm font-semibold text-foreground">{t('approvals.managerDecisionTitle')}</p>
             <p className="mt-1 text-sm text-muted-foreground">{t('approvals.managerDecisionBody')}</p>
           </div>
 
           {isLoading ? <p className="p-4 text-sm text-muted-foreground">{t('approvals.loadingCandidates')}</p> : null}
-          {!isLoading && actionableReviewItems.length === 0 ? (
+          {!isLoading && actionableReviewGroups.length === 0 ? (
             <p className="p-4 text-sm text-muted-foreground">{t('approvals.noManagerWaiting')}</p>
           ) : null}
 
           <div className="max-h-[38rem] divide-y divide-border/70 overflow-y-auto">
-            {actionableReviewItems.map((item) => (
-              <article key={item.id ?? item.transaction_id} className="p-4">
+            {actionableReviewGroups.map((group) => {
+              const item = group.representative
+              return (
+              <article key={group.key} className="p-4">
                 <div className="panel-reveal-soft rounded-2xl border border-border/70 bg-background/70 p-4">
                   <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <p className="font-semibold text-foreground">{item.merchant ?? 'Unknown merchant'}</p>
+                      {group.items.length > 1 ? <span className="status-chip bg-primary/10 text-primary">{group.items.length} linked rows</span> : null}
                       <StatusPill value={item.policy_status ?? 'review_required'} />
                       <RiskPill value={item.risk_level ?? 'low'} />
                     </div>
                     <p className="mt-1 text-sm text-muted-foreground">
                       {item.employee ?? t('transactions.syntheticEmployee')} · {item.department ?? t('transactions.syntheticDepartment')} · {item.transaction_date ?? '-'}
                     </p>
+                    {group.items.length > 1 ? (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Cluster total {currencyFormatter.format(group.totalAmount)} across {group.items.length} transactions.
+                      </p>
+                    ) : null}
                     <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
                       {item.reviewer_brief?.summary ?? item.ai_context ?? item.next_action}
                     </p>
@@ -485,21 +508,21 @@ export function ApprovalsPage() {
                     </div>
                   </div>
                   <div className="flex shrink-0 flex-col items-start gap-2 lg:items-end">
-                    <p className="text-lg font-semibold tabular-nums text-foreground">{currencyFormatter.format(item.amount_cad)}</p>
-                    <span className="text-xs text-muted-foreground">{t('approvals.priority').replace('{value}', String(item.review_priority))}</span>
+                    <p className="text-lg font-semibold tabular-nums text-foreground">{currencyFormatter.format(group.totalAmount)}</p>
+                    <span className="text-xs text-muted-foreground">{t('approvals.priority').replace('{value}', String(group.priority))}</span>
                     <Button
                       type="button"
                       onClick={() => void createFromReviewItem(item)}
                       disabled={isCreating === (item.id ?? item.transaction_id)}
                     >
                       <Send className="size-4" aria-hidden="true" />
-                      {isCreating === (item.id ?? item.transaction_id) ? t('approvals.creating') : t('approvals.openApproval')}
+                      {isCreating === (item.id ?? item.transaction_id) ? t('approvals.creating') : group.items.length > 1 ? 'Open cluster' : t('approvals.openApproval')}
                     </Button>
                   </div>
                 </div>
                 </div>
               </article>
-            ))}
+            )})}
           </div>
           {hasMoreCandidates ? (
             <div className="border-t border-border/70 p-4">
@@ -510,21 +533,23 @@ export function ApprovalsPage() {
           ) : null}
         </section>
 
-        <section className="grid gap-4">
+        <section className="grid self-start gap-4">
           <section className="surface-panel overflow-hidden">
             <div className="border-b border-border/70 p-4">
               <p className="text-sm font-semibold text-foreground">{t('approvals.savedApprovalsTitle')}</p>
               <p className="mt-1 text-sm text-muted-foreground">{t('approvals.savedApprovalsBody')}</p>
             </div>
             {isLoading ? <p className="p-4 text-sm text-muted-foreground">{t('approvals.loadingApprovals')}</p> : null}
-            {!isLoading && approvals.length === 0 ? <p className="p-4 text-sm text-muted-foreground">{t('approvals.noApprovals')}</p> : null}
+            {!isLoading && savedApprovalGroups.length === 0 ? <p className="p-4 text-sm text-muted-foreground">{t('approvals.noApprovals')}</p> : null}
             <div className="max-h-[24rem] divide-y divide-border/70 overflow-y-auto">
-              {approvals.map((approval) => (
+              {savedApprovalGroups.map((group) => {
+                const approval = group.representative
+                return (
                 <button
-                  key={approval.id}
+                  key={group.key}
                   type="button"
                   className={`w-full px-4 py-3 text-left transition ${
-                    selectedApproval?.id === approval.id ? 'bg-primary/8' : 'bg-background hover:bg-muted/70'
+                    group.items.some((item) => item.id === selectedApproval?.id) ? 'bg-primary/8' : 'bg-background hover:bg-muted/70'
                   }`}
                   onClick={() => void focusApproval(approval)}
                 >
@@ -534,9 +559,12 @@ export function ApprovalsPage() {
                       <span className="mt-1 block text-xs text-muted-foreground">
                         {approval.employee_name ?? t('transactions.syntheticEmployee')} · {approval.department_name ?? t('transactions.syntheticDepartment')}
                       </span>
+                      {group.items.length > 1 ? (
+                        <span className="mt-1 block text-xs text-primary">{group.items.length} linked approvals share this decision cluster</span>
+                      ) : null}
                     </span>
                     <span className="text-sm font-medium tabular-nums text-foreground">
-                      {currencyFormatter.format(approval.requested_amount_cad)}
+                      {currencyFormatter.format(group.totalAmount)}
                     </span>
                   </span>
                   <span className="mt-2 flex flex-wrap items-center gap-1.5">
@@ -548,7 +576,7 @@ export function ApprovalsPage() {
                     <span>{approval.id}</span>
                   </span>
                 </button>
-              ))}
+              )})}
             </div>
             {hasMoreApprovals ? (
               <div className="border-t border-border/70 p-4">
@@ -558,20 +586,21 @@ export function ApprovalsPage() {
               </div>
             ) : null}
           </section>
-
-          <ApprovalDetailPanel
-            actor={actor}
-            currencyFormatter={currencyFormatter}
-            decisionNote={decisionNote}
-            isDeciding={isDeciding}
-            linkedApprovalId={linkedApprovalId}
-            onActorChange={setActor}
-            onDecision={decide}
-            onDecisionNoteChange={setDecisionNote}
-            selectedApproval={selectedApproval}
-          />
         </section>
       </section>
+
+      <ApprovalDetailPanel
+        actor={actor}
+        currencyFormatter={currencyFormatter}
+        decisionNote={decisionNote}
+        isDeciding={isDeciding}
+        linkedApprovalId={linkedApprovalId}
+        onActorChange={setActor}
+        onDecision={decide}
+        onDecisionNoteChange={setDecisionNote}
+        panelRef={detailPanelRef}
+        selectedApproval={selectedApproval}
+      />
     </PageScaffold>
   )
 }
@@ -585,6 +614,7 @@ function ApprovalDetailPanel({
   onActorChange,
   onDecision,
   onDecisionNoteChange,
+  panelRef,
   selectedApproval,
 }: {
   actor: string
@@ -595,48 +625,22 @@ function ApprovalDetailPanel({
   onActorChange: (value: string) => void
   onDecision: (decision: ApprovalDecision) => void
   onDecisionNoteChange: (value: string) => void
+  panelRef: React.RefObject<HTMLElement | null>
   selectedApproval: ApprovalRequestDetail | null
 }) {
   const { t } = useUiPreferences()
 
   if (!selectedApproval) {
-    return (
-      <section className="surface-panel panel-reveal overflow-hidden p-4">
-        <div className="rounded-2xl border border-dashed border-border/80 bg-background/70 p-4">
-          <p className="text-sm font-semibold text-foreground">{t('approvals.decisionPacket')}</p>
-          <p className="mt-2 text-sm text-muted-foreground">{t('approvals.decisionPacketBody')}</p>
-          <div className="mt-4 grid gap-3">
-            <PacketTimelineStep
-              detail="Pick a queue item to reveal policy context, risk signals, and the decision workspace."
-              icon={<ReceiptText className="size-4" aria-hidden="true" />}
-              state="active"
-              title="Packet reveal"
-            />
-            <PacketTimelineStep
-              detail="A grounded recommendation, reviewer brief, and spend snapshot appear together before approval."
-              icon={<Info className="size-4" aria-hidden="true" />}
-              state="upcoming"
-              title="Decision context"
-            />
-            <PacketTimelineStep
-              detail="Save the manager name, log a note, and close the loop with approve or deny."
-              icon={<BadgeCheck className="size-4" aria-hidden="true" />}
-              state="upcoming"
-              title="Final decision"
-            />
-          </div>
-        </div>
-      </section>
-    )
+    return null
   }
 
   const recommendation = selectedApproval.ai_recommendation
+  const approvalExplanation = selectedApproval.approval_explanation
   const canDecide = activeApprovalStatuses.has(selectedApproval.status)
-  const readinessSteps = buildApprovalReadinessSteps(selectedApproval, actor)
   const keyReasons = selectedApproval.reviewer_brief?.key_reasons ?? []
 
   return (
-    <section className="surface-panel panel-reveal overflow-hidden">
+    <section ref={panelRef} className="surface-panel panel-reveal overflow-hidden scroll-mt-6">
       <div className="border-b border-border/70 bg-gradient-to-br from-primary/10 via-background to-background p-4">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="space-y-3">
@@ -655,7 +659,7 @@ function ApprovalDetailPanel({
             </div>
           </div>
 
-          <div className="grid min-w-[220px] gap-2 sm:grid-cols-3 lg:grid-cols-1">
+          <div className="grid min-w-[220px] gap-2 sm:grid-cols-3 xl:min-w-[320px]">
             <PacketStatCard label="Requested" value={currencyFormatter.format(selectedApproval.requested_amount_cad)} />
             <PacketStatCard label="Missing info" value={String(recommendation?.missing_information.length ?? 0)} />
             <PacketStatCard label="Signals" value={String(selectedApproval.risk_signals.length + selectedApproval.policy_flags.length)} />
@@ -664,18 +668,6 @@ function ApprovalDetailPanel({
       </div>
 
       <div className="grid gap-4 p-4">
-        <section className="rounded-2xl border border-border/70 bg-background/65 p-4">
-          <div className="flex items-center gap-2">
-            <ReceiptText className="size-4 text-primary" aria-hidden="true" />
-            <p className="text-sm font-semibold text-foreground">Packet readiness</p>
-          </div>
-          <div className="mt-4 grid gap-3">
-            {readinessSteps.map((step) => (
-              <PacketTimelineStep key={step.title} detail={step.detail} icon={step.icon} state={step.state} title={step.title} />
-            ))}
-          </div>
-        </section>
-
         {recommendation ? (
           <section className="rounded-2xl border border-primary/15 bg-primary/6 p-4">
             <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
@@ -690,13 +682,51 @@ function ApprovalDetailPanel({
           </section>
         ) : null}
 
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
-          <div className="grid gap-4">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <BudgetPanel approval={selectedApproval} currencyFormatter={currencyFormatter} />
-              <SpendHistoryPanel approval={selectedApproval} currencyFormatter={currencyFormatter} />
+        {approvalExplanation ? (
+          <section className="rounded-2xl border border-border/70 bg-background/65 p-4">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                  <Sparkles className="size-4 text-primary" aria-hidden="true" />
+                  Why this recommendation?
+                </div>
+                <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">{approvalExplanation.summary}</p>
+              </div>
+              <div className="grid min-w-[220px] gap-2 sm:grid-cols-2 lg:grid-cols-1">
+                <PacketStatCard label="Decision" value={formatLabel(approvalExplanation.decision)} />
+                <PacketStatCard label="Confidence" value={formatLabel(approvalExplanation.confidence)} />
+                <PacketStatCard label="Reversal paths" value={String(approvalExplanation.would_change_outcome_if.length)} />
+              </div>
             </div>
 
+            <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
+              <div className="grid gap-4">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Blocking reasons</p>
+                  {approvalExplanation.blocking_reasons.length === 0 ? (
+                    <p className="mt-2 text-sm text-muted-foreground">No blocking reasons are attached to this packet.</p>
+                  ) : (
+                    <div className="mt-2 grid gap-2">
+                      {approvalExplanation.blocking_reasons.map((reason) => (
+                        <ExplanationReasonCard key={`${reason.label}-${reason.detail}`} reason={reason} />
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <FactList title="Supporting evidence" items={approvalExplanation.supporting_evidence} empty="No grounded evidence recorded." />
+              </div>
+
+              <div className="grid gap-4">
+                <FactList title="What would change this outcome?" items={approvalExplanation.would_change_outcome_if} empty="No outcome changes suggested." />
+                <ClauseList clauses={approvalExplanation.cited_policy_clauses} />
+              </div>
+            </div>
+          </section>
+        ) : null}
+
+        <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1.08fr)_minmax(340px,0.92fr)]">
+          <div className="grid gap-4">
             {selectedApproval.reviewer_brief ? (
               <section className="rounded-2xl border border-border/70 bg-background/70 p-4">
                 <div className="flex items-center gap-2">
@@ -716,24 +746,35 @@ function ApprovalDetailPanel({
                 <p className="mt-3 text-xs leading-5 text-muted-foreground">{selectedApproval.reviewer_brief.advisory_notice}</p>
               </section>
             ) : null}
+
+            <div className="grid gap-3 lg:grid-cols-2">
+              <BudgetPanel approval={selectedApproval} currencyFormatter={currencyFormatter} />
+              <SpendHistoryPanel approval={selectedApproval} currencyFormatter={currencyFormatter} />
+            </div>
           </div>
 
           {canDecide ? (
-            <section className="rounded-2xl border border-border/70 bg-background/80 p-4">
+            <section className="rounded-2xl border border-border/70 bg-background/80 p-4 xl:sticky xl:top-4">
               <div className="flex items-center gap-2">
                 <UserRound className="size-4 text-primary" aria-hidden="true" />
                 <p className="text-sm font-semibold text-foreground">{t('approvals.decision')}</p>
               </div>
               <p className="mt-1 text-sm text-muted-foreground">Capture the final approver and log the rationale that should travel with this packet.</p>
               <div className="mt-4 grid gap-3">
-                <input
-                  className="h-10 rounded-xl border border-input bg-background px-3 text-sm text-foreground"
-                  value={actor}
-                  onChange={(event) => onActorChange(event.target.value)}
-                  placeholder={selectedApproval.approver_name ?? 'Finance Manager'}
-                />
+                <div className="grid gap-2">
+                  <input
+                    className="h-10 rounded-xl border border-input bg-background px-3 text-sm text-foreground"
+                    value={actor}
+                    onChange={(event) => onActorChange(event.target.value)}
+                    placeholder={selectedApproval.approver_name ?? 'Finance Manager'}
+                  />
+                </div>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <PacketStatCard label="Requested amount" value={currencyFormatter.format(selectedApproval.requested_amount_cad)} />
+                  <PacketStatCard label="Signals" value={String(selectedApproval.risk_signals.length + selectedApproval.policy_flags.length)} />
+                </div>
                 <textarea
-                  className="min-h-28 resize-y rounded-xl border border-input bg-background p-3 text-sm leading-6 text-foreground"
+                  className="min-h-20 resize-y rounded-xl border border-input bg-background p-3 text-sm leading-6 text-foreground"
                   value={decisionNote}
                   onChange={(event) => onDecisionNoteChange(event.target.value)}
                   placeholder={t('approvals.decisionNote')}
@@ -751,7 +792,7 @@ function ApprovalDetailPanel({
               </div>
             </section>
           ) : (
-            <section className="rounded-2xl border border-emerald-300/50 bg-emerald-100/50 p-4 text-sm text-emerald-900 dark:border-emerald-400/25 dark:bg-emerald-400/10 dark:text-emerald-100">
+            <section className="rounded-2xl border border-emerald-300/50 bg-emerald-100/50 p-4 text-sm text-emerald-900 dark:border-emerald-400/25 dark:bg-emerald-400/10 dark:text-emerald-100 xl:sticky xl:top-4">
               <p className="font-semibold">Decision already saved</p>
               <p className="mt-2 leading-6">
                 {t('approvals.decisionSaved')
@@ -839,74 +880,6 @@ function PacketStatCard({ label, value }: { label: string; value: string }) {
   )
 }
 
-function PacketTimelineStep({
-  detail,
-  icon,
-  state,
-  title,
-}: {
-  detail: string
-  icon: React.ReactNode
-  state: 'complete' | 'active' | 'upcoming'
-  title: string
-}) {
-  const stateClass =
-    state === 'complete'
-      ? 'border-emerald-300/60 bg-emerald-100/40 text-emerald-800 dark:border-emerald-400/25 dark:bg-emerald-400/10 dark:text-emerald-100'
-      : state === 'active'
-        ? 'border-primary/25 bg-primary/8 text-primary'
-        : 'border-border/70 bg-background/70 text-muted-foreground'
-
-  const titleClass = state === 'upcoming' ? 'text-foreground' : ''
-
-  return (
-    <div className={`rounded-2xl border p-3 ${stateClass}`}>
-      <div className="flex items-start gap-3">
-        <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full bg-background/85">{icon}</span>
-        <div>
-          <p className={`text-sm font-semibold ${titleClass}`}>{title}</p>
-          <p className="mt-1 text-sm leading-6 text-muted-foreground">{detail}</p>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function buildApprovalReadinessSteps(approval: ApprovalRequestDetail, actor: string) {
-  const hasRecommendation = Boolean(approval.ai_recommendation)
-  const hasReviewerBrief = Boolean(approval.reviewer_brief?.summary)
-  const isClosed = !activeApprovalStatuses.has(approval.status)
-
-  return [
-    {
-      title: 'Signals attached',
-      detail: `${formatLabel(approval.policy_status ?? 'compliant')} policy and ${formatLabel(approval.risk_level ?? 'low')} risk are attached to the packet.`,
-      icon: <ShieldAlert className="size-4" aria-hidden="true" />,
-      state: 'complete' as const,
-    },
-    {
-      title: 'Manager packet assembled',
-      detail: hasRecommendation || hasReviewerBrief ? 'Recommendation, reviewer notes, and supporting context are visible.' : 'Context is still light, but the packet can be reviewed.',
-      icon: <Info className="size-4" aria-hidden="true" />,
-      state: hasRecommendation || hasReviewerBrief ? ('complete' as const) : ('active' as const),
-    },
-    {
-      title: 'Approver confirmed',
-      detail: (actor || approval.approver_name) ? `Decision will be recorded under ${actor || approval.approver_name}.` : 'Add the final approver name before saving a decision.',
-      icon: <UserRound className="size-4" aria-hidden="true" />,
-      state: (actor || approval.approver_name) ? ('complete' as const) : ('active' as const),
-    },
-    {
-      title: isClosed ? 'Decision saved' : 'Awaiting final decision',
-      detail: isClosed
-        ? `Packet closed as ${formatLabel(approval.status)}${approval.decided_at ? ` on ${approval.decided_at}` : ''}.`
-        : 'Approve or deny to send this packet back into the workflow with an audit trail.',
-      icon: isClosed ? <BadgeCheck className="size-4" aria-hidden="true" /> : <CircleDashed className="size-4" aria-hidden="true" />,
-      state: isClosed ? ('complete' as const) : ('active' as const),
-    },
-  ]
-}
-
 function BudgetPanel({ approval, currencyFormatter }: { approval: ApprovalRequestItem; currencyFormatter: Intl.NumberFormat }) {
   const { t } = useUiPreferences()
   const budget = approval.budget_status
@@ -970,6 +943,73 @@ function FactList({ empty = 'None.', items, title }: { empty?: string; items: st
   )
 }
 
+function ExplanationReasonCard({
+  reason,
+}: {
+  reason: {
+    label: string
+    severity: 'info' | 'warning' | 'blocking'
+    detail: string
+  }
+}) {
+  const toneClass =
+    reason.severity === 'blocking'
+      ? 'border-red-300/60 bg-red-100/60 dark:border-red-400/20 dark:bg-red-400/10'
+      : reason.severity === 'warning'
+        ? 'border-amber-300/60 bg-amber-100/60 dark:border-amber-400/20 dark:bg-amber-400/10'
+        : 'border-border/70 bg-background/70'
+  const labelClass =
+    reason.severity === 'blocking'
+      ? 'text-red-700 dark:text-red-100'
+      : reason.severity === 'warning'
+        ? 'text-amber-800 dark:text-amber-100'
+        : 'text-foreground'
+
+  return (
+    <div className={`rounded-2xl border p-3 ${toneClass}`}>
+      <p className={`text-sm font-semibold ${labelClass}`}>{reason.label}</p>
+      <p className="mt-1 text-sm leading-6 text-muted-foreground">{reason.detail}</p>
+    </div>
+  )
+}
+
+function ClauseList({
+  clauses,
+}: {
+  clauses: Array<{
+    rule_code?: string | null
+    clause_id?: string | null
+    title?: string | null
+    text: string
+    source?: string | null
+  }>
+}) {
+  return (
+    <div>
+      <p className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Policy citations</p>
+      {clauses.length === 0 ? <p className="mt-2 text-sm text-muted-foreground">No policy citation is attached to this packet yet.</p> : null}
+      <div className="mt-2 grid gap-2">
+        {clauses.map((clause) => (
+          <div
+            key={`${clause.rule_code ?? 'policy'}-${clause.clause_id ?? clause.text}`}
+            className="rounded-2xl border border-border/70 bg-background/70 p-3"
+          >
+            <p className="text-sm font-semibold text-foreground">
+              {clause.title ?? formatLabel(clause.rule_code ?? 'policy clause')}
+            </p>
+            <p className="mt-1 text-sm leading-6 text-muted-foreground">{clause.text}</p>
+            {(clause.source || clause.rule_code) ? (
+              <p className="mt-2 text-xs text-muted-foreground">
+                {[clause.rule_code ? formatLabel(clause.rule_code) : null, clause.source].filter(Boolean).join(' · ')}
+              </p>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function ApprovalStatusPill({ status }: { status: ApprovalStatus }) {
   const className =
     status === 'approved'
@@ -1021,6 +1061,106 @@ function isApprovalCandidate(item: ReviewQueueItem) {
     return true
   }
   return item.risk_level === 'high' || item.risk_level === 'critical'
+}
+
+function groupReviewApprovalCandidates(items: ReviewQueueItem[]): ReviewApprovalGroup[] {
+  const groups = new Map<string, ReviewQueueItem[]>()
+
+  for (const item of items) {
+    const key = item.review_group_key ?? fallbackReviewGroupKey(item)
+    groups.set(key, [...(groups.get(key) ?? []), item])
+  }
+
+  return Array.from(groups.entries())
+    .map(([key, groupItems]) => {
+      const sortedItems = sortReviewItems(groupItems)
+      const representative = sortedItems[0]
+      const transactionIds = groupTransactionIds(sortedItems)
+
+      return {
+        key,
+        items: sortedItems,
+        representative,
+        totalAmount: Number(
+          (representative.review_group_total_amount_cad || sortedItems.reduce((total, item) => total + item.amount_cad, 0)).toFixed(2),
+        ),
+        transactionIds,
+        priority: Math.max(...sortedItems.map((item) => item.review_priority)),
+      }
+    })
+    .sort((left, right) => right.priority - left.priority || right.totalAmount - left.totalAmount)
+}
+
+function groupSavedApprovals(items: ApprovalRequestItem[]): SavedApprovalGroup[] {
+  const groups = new Map<string, ApprovalRequestItem[]>()
+
+  for (const item of items) {
+    const key = item.review_group_key ?? fallbackApprovalGroupKey(item)
+    groups.set(key, [...(groups.get(key) ?? []), item])
+  }
+
+  return Array.from(groups.entries())
+    .map(([key, groupItems]) => {
+      const sortedItems = [...groupItems].sort((left, right) => (right.created_at ?? '').localeCompare(left.created_at ?? ''))
+      const representative = sortedItems[0]
+
+      return {
+        key,
+        items: sortedItems,
+        representative,
+        totalAmount: Number(
+          (representative.review_group_total_amount_cad || sortedItems.reduce((total, item) => total + item.requested_amount_cad, 0)).toFixed(2),
+        ),
+        transactionIds: dedupeStrings(sortedItems.flatMap((item) => item.review_group_transaction_ids.length > 0 ? item.review_group_transaction_ids : [item.transaction_id])),
+      }
+    })
+    .sort((left, right) => (right.representative.created_at ?? '').localeCompare(left.representative.created_at ?? ''))
+}
+
+function sortReviewItems(items: ReviewQueueItem[]) {
+  return [...items].sort((left, right) => right.review_priority - left.review_priority || right.amount_cad - left.amount_cad)
+}
+
+function groupTransactionIds(items: ReviewQueueItem[]) {
+  return dedupeStrings(items.flatMap((item) => (item.review_group_transaction_ids.length > 0 ? item.review_group_transaction_ids : [item.transaction_id])))
+}
+
+function fallbackReviewGroupKey(item: ReviewQueueItem) {
+  if (!item.merchant || !item.transaction_date || !item.employee_id) {
+    return `transaction:${item.transaction_id}`
+  }
+
+  return [
+    'review-context',
+    normalizeGroupValue(item.employee_id),
+    normalizeGroupValue(item.department_id),
+    normalizeGroupValue(item.merchant),
+    item.transaction_date,
+    normalizeGroupValue(item.category),
+  ].join('|')
+}
+
+function fallbackApprovalGroupKey(item: ApprovalRequestItem) {
+  if (!item.merchant || !item.transaction_date || !item.employee_id) {
+    return `transaction:${item.transaction_id}`
+  }
+
+  return [
+    'review-context',
+    normalizeGroupValue(item.employee_id),
+    normalizeGroupValue(item.department_id),
+    normalizeGroupValue(item.merchant),
+    item.transaction_date,
+    normalizeGroupValue(item.category),
+  ].join('|')
+}
+
+function normalizeGroupValue(value: string | null | undefined) {
+  return (value ?? 'unknown').trim().toLowerCase().replace(/\s+/g, ' ')
+}
+
+function dedupeStrings(values: string[]) {
+  return Array.from(new Set(values.filter(Boolean)))
 }
 
 function formatLabel(value: string) {

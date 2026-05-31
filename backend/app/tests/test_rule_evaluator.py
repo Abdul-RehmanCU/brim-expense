@@ -236,6 +236,106 @@ def test_applies_to_merchant_family_and_workflow_tags_gate_rules():
     assert evaluate_configurable_rule(workflow_rule, account_payment).violations == []
 
 
+def test_reimbursable_eligibility_alias_matches_normal_expense_context():
+    rule = configurable_rule(
+        rule_code="REIMBURSABLE_PREAUTH_REVIEW",
+        condition={
+            "all": [
+                {"field": "amount_cad", "operator": "gt", "value": 50},
+                {"field": "missing_preapproval", "operator": "is_true"},
+            ]
+        },
+        outcome={
+            "violation": {
+                "rule_code": "REIMBURSABLE_PREAUTH_REVIEW",
+                "severity": "high",
+                "explanation": "Reimbursable expense needs preapproval review.",
+                "required_action": "Collect preapproval evidence.",
+            }
+        },
+        applies_to={"eligibility_tags": ["reimbursable"]},
+    )
+
+    assert evaluate_configurable_rule(rule, context(amount_cad=75)).violations[0].rule_code == "REIMBURSABLE_PREAUTH_REVIEW"
+
+
+def test_employee_role_applies_to_matches_role_families():
+    role_rule = configurable_rule(
+        rule_code="MANAGER_ROLE_REVIEW",
+        condition={"field": "amount_cad", "operator": "gt", "value": 50},
+        outcome={
+            "violation": {
+                "rule_code": "MANAGER_ROLE_REVIEW",
+                "severity": "medium",
+                "explanation": "Manager role expense needs review.",
+                "required_action": "Review manager approval path.",
+            }
+        },
+        applies_to={"employee_roles": ["Manager"]},
+    )
+    manager_context = context(amount_cad=75, employee_role="Marketing Manager")
+
+    assert evaluate_configurable_rule(role_rule, manager_context).violations[0].rule_code == "MANAGER_ROLE_REVIEW"
+
+
+def test_policy_category_aliases_match_permit_rule_when_policy_category_is_inferred():
+    permit_rule = configurable_rule(
+        rule_code="PERMIT_APPROVAL_REVIEW",
+        condition={
+            "all": [
+                {"field": "policy_category", "operator": "eq", "value": "permit"},
+                {"field": "amount_cad", "operator": "gt", "value": 500},
+            ]
+        },
+        outcome={
+            "violation": {
+                "rule_code": "PERMIT_APPROVAL_REVIEW",
+                "severity": "high",
+                "explanation": "Permit charge needs approval review.",
+                "required_action": "Verify permit approval evidence.",
+            }
+        },
+        applies_to={"workflow_tags": ["approval_required"], "business_categories": ["permit"]},
+    )
+    permit_context = context(
+        amount_cad=650,
+        description="Oversize permit fee",
+        merchant_name="WSDOT COMMERCIAL VEHIC",
+        normalized_merchant_name="WSDOT COMMERCIAL VEHIC",
+        business_category="Permits / Government Fees",
+        normalized_category="Permits / Government Fees",
+        source_category="Permit",
+    )
+
+    assert evaluate_configurable_rule(permit_rule, permit_context).violations[0].rule_code == "PERMIT_APPROVAL_REVIEW"
+
+
+def test_specific_lodging_category_rule_does_not_match_fuel_via_travel_family_tokens():
+    lodging_rule = configurable_rule(
+        rule_code="LODGING_RECEIPT_REVIEW",
+        condition={"field": "category", "operator": "eq", "value": "lodging"},
+        outcome={
+            "violation": {
+                "rule_code": "LODGING_RECEIPT_REVIEW",
+                "severity": "high",
+                "explanation": "Lodging needs a receipt.",
+                "required_action": "Request a lodging receipt.",
+            }
+        },
+    )
+    fuel_context = context(
+        description="Fuel stop",
+        merchant_name="PILOT",
+        normalized_merchant_name="PILOT",
+        business_category="Fuel",
+        normalized_category="Fuel",
+        policy_category="Fuel",
+        source_category="Fuel",
+    )
+
+    assert evaluate_configurable_rule(lodging_rule, fuel_context).violations == []
+
+
 def test_eligibility_and_workflow_scopes_do_not_match_each_other():
     eligibility_rule = configurable_rule(
         rule_code="ACCOUNT_PAYMENT_ELIGIBILITY_REVIEW",

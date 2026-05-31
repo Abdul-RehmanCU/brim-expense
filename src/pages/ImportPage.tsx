@@ -1,5 +1,5 @@
-import { CheckCircle2, Database, FileText, Upload } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { CheckCircle2, Database, Upload } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
 
 import { PageScaffold } from '@/components/layout/PageScaffold'
 import { Button } from '@/components/ui/button'
@@ -56,7 +56,7 @@ export function ImportPage() {
         ? `Prepared ${parseResult.rows.length} rows with ${parseResult.errors.length} row error(s).`
         : sourceFileName
           ? `Working with ${sourceFileName}.`
-          : 'Prepare a CSV import for preview.',
+          : 'Add a CSV to prepare the import.',
       visibleEntities: previewRows.map((row, index) => ({
         type: 'import_preview_row',
         id: `${sourceFileName ?? 'preview'}-${index}`,
@@ -145,22 +145,7 @@ export function ImportPage() {
     }))
   }
 
-  async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0]
-
-    if (!file) {
-      return
-    }
-
-    setError(null)
-    setImportResult(null)
-    setValidationResult(null)
-    setParseResult(null)
-    setSourceFileName(file.name)
-    setCsvText(await readFileAsText(file))
-  }
-
-  async function handlePreview() {
+  async function runPreview(nextCsvText: string) {
     setIsWorking(true)
     setError(null)
     setImportResult(null)
@@ -173,7 +158,7 @@ export function ImportPage() {
         throw new Error('No synthetic employees found. Run the Supabase migrations and seed files first.')
       }
 
-      const nextParseResult = parseTransactionCsv(csvText, employees)
+      const nextParseResult = parseTransactionCsv(nextCsvText, employees)
       setParseResult(nextParseResult)
 
       if (nextParseResult.rows.length > 0 && nextParseResult.missingColumns.length === 0) {
@@ -191,6 +176,40 @@ export function ImportPage() {
       setIsWorking(false)
     }
   }
+
+  async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+
+    if (!file) {
+      return
+    }
+
+    setError(null)
+    setImportResult(null)
+    setValidationResult(null)
+    setParseResult(null)
+    setSourceFileName(file.name)
+    setCsvText(await readFileAsText(file))
+  }
+
+  useEffect(() => {
+    const trimmedCsvText = csvText.trim()
+
+    if (!trimmedCsvText) {
+      setParseResult(null)
+      setValidationResult(null)
+      setImportResult(null)
+      setError(null)
+      setIsWorking(false)
+      return
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void runPreview(csvText)
+    }, 320)
+
+    return () => window.clearTimeout(timeoutId)
+  }, [csvText])
 
   async function handleImport() {
     if (!parseResult) {
@@ -239,9 +258,7 @@ export function ImportPage() {
                 value={csvText}
                 onChange={(event) => {
                   setCsvText(event.target.value)
-                  setParseResult(null)
-                  setValidationResult(null)
-                  setImportResult(null)
+                  setSourceFileName(null)
                 }}
                 className="min-h-48 resize-y rounded-lg border border-input bg-background/80 p-3 font-mono text-xs leading-5 text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
                 placeholder={t('import.placeholder')}
@@ -249,10 +266,6 @@ export function ImportPage() {
             </label>
 
             <div className="flex flex-wrap gap-2">
-              <Button type="button" onClick={handlePreview} disabled={isWorking || csvText.trim().length === 0}>
-                <FileText className="size-4" aria-hidden="true" />
-                {t('actions.preview')}
-              </Button>
               <Button type="button" variant="secondary" onClick={handleImport} disabled={isWorking || !canImport}>
                 <Database className="size-4" aria-hidden="true" />
                 {t('actions.import')}
@@ -264,21 +277,10 @@ export function ImportPage() {
         <aside className="surface-panel p-4">
           <p className="text-sm font-semibold text-foreground">{t('import.statusTitle')}</p>
           <div className="mt-4 space-y-3 text-sm text-muted-foreground">
+            <p>{t('import.sourceLabel')}: {sourceFileName ?? t('import.sourcePasted')}</p>
             <p>{t('import.rowsReady')}: {parseResult?.rows.length ?? 0}</p>
-            <p>{t('import.rowErrors')}: {parseResult?.errors.length ?? 0}</p>
-            <p>{t('import.missingColumns')}: {parseResult?.missingColumns.length ?? 0}</p>
-            <p>Backend findings: {validationResult?.summary.finding_count ?? 0}</p>
-            {validationResult ? (
-              <div className="rounded-lg border border-border/70 bg-background/60 p-3 text-foreground">
-                <p className="text-sm font-medium">Authoritative validation</p>
-                <p className="mt-2 text-sm text-muted-foreground">
-                  {validationResult.summary.rows_with_findings} row(s) with findings across {validationResult.row_count} validated row(s).
-                </p>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  High/Critical: {validationResult.summary.high_count + validationResult.summary.critical_count} · Medium: {validationResult.summary.medium_count} · Low: {validationResult.summary.low_count}
-                </p>
-              </div>
-            ) : null}
+            <p>{t('import.previewRowsLabel')}: {previewRows.length}</p>
+            <p>{t('import.readinessLabel')}: {canImport ? t('import.readinessReady') : t('import.readinessNeedsAttention')}</p>
             {importResult ? (
               <div className="rounded-lg border border-primary/30 bg-primary/10 p-3 text-foreground">
                 <div className="flex items-center gap-2 font-medium">
@@ -302,24 +304,6 @@ export function ImportPage() {
         <section className="rounded-lg border border-amber-300/70 bg-amber-100/70 p-4 text-sm text-amber-900 dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-amber-100">
           <p className="font-semibold">{t('import.missingColumnsTitle')}</p>
           <p className="mt-2">{parseResult.missingColumns.join(', ')}</p>
-        </section>
-      ) : null}
-
-      {parseResult && (parseResult.errors.length > 0 || (validationResult?.findings.length ?? 0) > 0) ? (
-        <section className="surface-panel p-4">
-          <p className="text-sm font-semibold text-foreground">{t('import.errorsTitle')}</p>
-          <div className="mt-3 max-h-48 overflow-auto text-sm text-red-700 dark:text-red-200">
-            {parseResult.errors.slice(0, 20).map((rowError) => (
-              <p key={`${rowError.sourceRowNumber}-${rowError.message}`}>
-                {t('import.row')} {rowError.sourceRowNumber}: {rowError.message}
-              </p>
-            ))}
-            {validationResult?.findings.slice(0, 12).map((finding, index) => (
-              <p key={`${finding.rule_id}-${finding.source_row ?? index}`}>
-                Backend: {finding.rule_id} {finding.source_row ? `on row ${finding.source_row}` : ''} - {finding.explanation}
-              </p>
-            ))}
-          </div>
         </section>
       ) : null}
 

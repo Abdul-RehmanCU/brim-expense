@@ -1,15 +1,14 @@
-import { AlertTriangle, RefreshCw, Trash2 } from 'lucide-react'
+import { AlertTriangle, Download, Trash2 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 
 import { PageScaffold } from '@/components/layout/PageScaffold'
 import { Button } from '@/components/ui/button'
 import {
-  enrichExistingTransactions,
   resetTransactions as resetTransactionsRequest,
-  type TransactionEnrichmentResponse,
   type TransactionResetResponse,
 } from '@/lib/api/backendClient'
 import { useAssistantPageContext } from '@/lib/assistant/AssistantProvider'
+import { downloadTextFile } from '@/lib/insights/artifacts'
 import { listRecentTransactions, type TransactionListItem } from '@/lib/supabase/transactions'
 import { useUiPreferences } from '@/lib/ui/preferences'
 
@@ -17,12 +16,10 @@ const transactionsPageSize = 50
 
 export function TransactionsPage() {
   const [transactions, setTransactions] = useState<TransactionListItem[]>([])
-  const [enrichmentSummary, setEnrichmentSummary] = useState<TransactionEnrichmentResponse | null>(null)
   const [resetSummary, setResetSummary] = useState<TransactionResetResponse | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isLoadingMore, setIsLoadingMore] = useState(false)
   const [hasMoreTransactions, setHasMoreTransactions] = useState(false)
-  const [isEnriching, setIsEnriching] = useState(false)
   const [isResetting, setIsResetting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const { locale, t } = useUiPreferences()
@@ -55,7 +52,7 @@ export function TransactionsPage() {
       return {
         routeId: 'transactions' as const,
         title: 'Transactions',
-        summary: `Viewing ${transactions.length} recent transactions${enrichmentSummary ? ` after enriching ${enrichmentSummary.updated} rows` : ''}.`,
+        summary: `Viewing ${transactions.length} recent transactions.`,
         filters: {
           visible_transaction_ids: visibleTransactionIds,
         },
@@ -112,7 +109,6 @@ export function TransactionsPage() {
           visible_count: transactions.length,
           visible_total_amount_cad: Number(visibleTotalAmount.toFixed(2)),
           visible_department_count: visibleDepartments.length,
-          is_enriching: isEnriching,
         },
         availableViews: ['recent transactions', 'top visible items', 'merchant and category table'],
         suggestions: [
@@ -121,7 +117,7 @@ export function TransactionsPage() {
         ],
       }
     },
-    [transactions, enrichmentSummary, isEnriching],
+    [transactions],
   )
   useAssistantPageContext(assistantContext)
 
@@ -158,24 +154,6 @@ export function TransactionsPage() {
     }
   }
 
-  async function enrichTransactions() {
-    setIsEnriching(true)
-    setError(null)
-    setResetSummary(null)
-
-    try {
-      const summary = await enrichExistingTransactions({ batch_size: 500 })
-      setEnrichmentSummary(summary)
-      const loadedTransactions = await listRecentTransactions({ limit: transactionsPageSize })
-      setTransactions(loadedTransactions)
-      setHasMoreTransactions(loadedTransactions.length === transactionsPageSize)
-    } catch (enrichError) {
-      setError(enrichError instanceof Error ? enrichError.message : 'Could not enrich transactions.')
-    } finally {
-      setIsEnriching(false)
-    }
-  }
-
   async function resetTransactions() {
     const confirmed = window.confirm(t('transactions.confirmReset'))
     if (!confirmed) {
@@ -188,13 +166,50 @@ export function TransactionsPage() {
     try {
       const summary = await resetTransactionsRequest()
       setResetSummary(summary)
-      setEnrichmentSummary(null)
       await loadTransactions()
     } catch (resetError) {
       setError(resetError instanceof Error ? resetError.message : 'Could not clear transactions.')
     } finally {
       setIsResetting(false)
     }
+  }
+
+  function downloadTransactions() {
+    if (transactions.length === 0) {
+      return
+    }
+
+    const header = [
+      t('transactions.date'),
+      t('transactions.merchant'),
+      t('transactions.category'),
+      t('transactions.employee'),
+      t('transactions.department'),
+      t('transactions.amountCad'),
+      t('transactions.country'),
+      t('transactions.mcc'),
+      t('transactions.fingerprint'),
+    ]
+    const rows = transactions.map((transaction) => [
+      transaction.transactionDate ?? '',
+      transaction.normalizedMerchantName ?? transaction.merchantName ?? '',
+      transaction.businessCategory ?? '',
+      transaction.employeeName ?? t('transactions.syntheticEmployee'),
+      transaction.departmentName ?? t('transactions.syntheticDepartment'),
+      transaction.amountCad.toFixed(2),
+      transaction.merchantCountry ?? '',
+      transaction.merchantCategoryCode ?? '',
+      transaction.sourceFingerprint ?? '',
+    ])
+    const csv = [header, ...rows]
+      .map((row) =>
+        row
+          .map((value) => (/[",\n]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value))
+          .join(','),
+      )
+      .join('\n')
+
+    downloadTextFile(csv, `transactions-${new Date().toISOString().slice(0, 10)}.csv`, 'text/csv;charset=utf-8')
   }
 
   useEffect(() => {
@@ -235,15 +250,10 @@ export function TransactionsPage() {
             <p className="text-sm font-semibold text-foreground">{t('transactions.recent')}</p>
             <p className="mt-1 text-sm text-muted-foreground">{t('transactions.recentBody')}</p>
           </div>
-          <div className="flex flex-wrap gap-2">
-            <Button type="button" variant="outline" onClick={loadTransactions} disabled={isLoading || isEnriching || isResetting}>
-              <RefreshCw className="size-4" aria-hidden="true" />
-              {t('actions.refresh')}
-            </Button>
-            <Button type="button" onClick={enrichTransactions} disabled={isEnriching || isResetting}>
-              {isEnriching ? t('transactions.enriching') : t('transactions.enrichExisting')}
-            </Button>
-          </div>
+          <Button type="button" variant="outline" onClick={downloadTransactions} disabled={transactions.length === 0 || isLoading}>
+            <Download className="size-4" aria-hidden="true" />
+            {t('transactions.download')}
+          </Button>
         </div>
 
         {error ? <p className="m-4 rounded-lg border border-red-300/70 bg-red-100/70 p-3 text-sm text-red-700 dark:border-red-400/30 dark:bg-red-400/10 dark:text-red-100">{error}</p> : null}
@@ -257,15 +267,6 @@ export function TransactionsPage() {
               .replace('{remainder}', formatResetRemainder(resetSummary, locale, t))}
           </p>
         ) : null}
-        {enrichmentSummary ? (
-          <p className="m-4 rounded-lg border border-border/70 bg-muted p-3 text-sm text-muted-foreground">
-            {t('transactions.enrichmentSummary')
-              .replace('{updated}', enrichmentSummary.updated.toLocaleString(locale))
-              .replace('{seen}', enrichmentSummary.total_seen.toLocaleString(locale))
-              .replace('{duration}', formatDuration(enrichmentSummary.duration_ms))}
-          </p>
-        ) : null}
-
         {isLoading ? <p className="p-4 text-sm text-muted-foreground">{t('transactions.loading')}</p> : null}
 
         {!isLoading && transactions.length === 0 && !error ? (
@@ -342,7 +343,7 @@ export function TransactionsPage() {
             type="button"
             variant="destructive"
             onClick={resetTransactions}
-            disabled={isLoading || isEnriching || isResetting}
+            disabled={isLoading || isResetting}
           >
             <Trash2 className="size-4" aria-hidden="true" />
             {isResetting ? t('transactions.clearing') : t('transactions.clearImport')}
@@ -351,14 +352,6 @@ export function TransactionsPage() {
       </section>
     </PageScaffold>
   )
-}
-
-function formatDuration(durationMs: number) {
-  if (durationMs < 1000) {
-    return `${durationMs} ms`
-  }
-
-  return `${(durationMs / 1000).toFixed(1)} s`
 }
 
 function formatResetRemainder(

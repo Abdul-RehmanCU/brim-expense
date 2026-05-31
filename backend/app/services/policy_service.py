@@ -175,6 +175,13 @@ HUMAN_JUDGMENT_TERMS = {
     "personal use",
     "reasonable",
 }
+PATTERN_REVIEW_TERMS = {
+    "duplicate",
+    "near duplicate",
+    "same day",
+    "split transaction",
+    "threshold avoidance",
+}
 SEVERITY_RANK: dict[Severity, int] = {
     "low": 1,
     "medium": 2,
@@ -1147,6 +1154,11 @@ def activation_guardrail_errors(rule_json: dict[str, Any]) -> list[str]:
             "Activation blocked: human-judgment policy language needs deterministic evidence or category/merchant scope before enforcement."
         )
 
+    if contains_pattern_review_term(combined_text):
+        errors.append(
+            "Activation blocked: duplicate or split-transaction rules need dedicated clustering or risk facts before enforcement."
+        )
+
     return sorted(set(errors))
 
 
@@ -1158,6 +1170,10 @@ def is_amount_only_preauthorization_rule(fields: set[str], combined_text: str) -
 
 def contains_human_judgment_term(combined_text: str) -> bool:
     return any(term in combined_text for term in HUMAN_JUDGMENT_TERMS)
+
+
+def contains_pattern_review_term(combined_text: str) -> bool:
+    return any(term in combined_text for term in PATTERN_REVIEW_TERMS)
 
 
 def policy_rule_search_text(rule_json: dict[str, Any]) -> str:

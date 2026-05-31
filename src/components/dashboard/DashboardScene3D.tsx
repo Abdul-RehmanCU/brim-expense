@@ -1,39 +1,103 @@
 import { useEffect, useRef } from 'react'
 import * as THREE from 'three'
 
-function createRoundedRectShape(width: number, height: number, radius: number) {
-  const shape = new THREE.Shape()
-  const x = -width / 2
-  const y = -height / 2
-
-  shape.moveTo(x + radius, y)
-  shape.lineTo(x + width - radius, y)
-  shape.quadraticCurveTo(x + width, y, x + width, y + radius)
-  shape.lineTo(x + width, y + height - radius)
-  shape.quadraticCurveTo(x + width, y + height, x + width - radius, y + height)
-  shape.lineTo(x + radius, y + height)
-  shape.quadraticCurveTo(x, y + height, x, y + height - radius)
-  shape.lineTo(x, y + radius)
-  shape.quadraticCurveTo(x, y, x + radius, y)
-
-  return shape
+type PulseOrb = {
+  mesh: THREE.Mesh
+  orbitOffset: number
+  orbitRadius: number
+  speed: number
+  tilt: number
 }
 
-function createPlate(material: THREE.Material, scale = 1) {
-  const shape = createRoundedRectShape(3.8 * scale, 2.4 * scale, 0.34 * scale)
-  const geometry = new THREE.ExtrudeGeometry(shape, {
-    bevelEnabled: true,
-    bevelSegments: 10,
-    bevelSize: 0.06 * scale,
-    bevelThickness: 0.06 * scale,
-    curveSegments: 24,
-    depth: 0.24 * scale,
-    steps: 1,
-  })
+type FlareOrb = {
+  mesh: THREE.Mesh
+  offset: number
+}
 
-  geometry.center()
+function createSphereNodes(count: number, radius: number) {
+  const positions = new Float32Array(count * 3)
+  const vectors: THREE.Vector3[] = []
+  const phi = Math.PI * (3 - Math.sqrt(5))
 
-  return new THREE.Mesh(geometry, material)
+  for (let index = 0; index < count; index += 1) {
+    const y = 1 - (index / (count - 1)) * 2
+    const radial = Math.sqrt(1 - y * y)
+    const theta = phi * index
+    const jitter = Math.sin(index * 1.73) * 0.07
+    const pointRadius = radius + jitter
+
+    const vector = new THREE.Vector3(
+      Math.cos(theta) * radial * pointRadius,
+      y * pointRadius,
+      Math.sin(theta) * radial * pointRadius,
+    )
+
+    vectors.push(vector)
+    positions[index * 3] = vector.x
+    positions[index * 3 + 1] = vector.y
+    positions[index * 3 + 2] = vector.z
+  }
+
+  return { positions, vectors }
+}
+
+function createConnectionGeometry(vectors: THREE.Vector3[], flaggedIndices: Set<number>) {
+  const linePositions: number[] = []
+  const lineColors: number[] = []
+  const maxDistance = 0.9
+  const maxConnectionsPerNode = 3
+  const connectionCount = new Array(vectors.length).fill(0)
+
+  for (let sourceIndex = 0; sourceIndex < vectors.length; sourceIndex += 1) {
+    for (let targetIndex = sourceIndex + 1; targetIndex < vectors.length; targetIndex += 1) {
+      if (connectionCount[sourceIndex] >= maxConnectionsPerNode || connectionCount[targetIndex] >= maxConnectionsPerNode) {
+        continue
+      }
+
+      const distance = vectors[sourceIndex].distanceTo(vectors[targetIndex])
+      if (distance > maxDistance) {
+        continue
+      }
+
+      connectionCount[sourceIndex] += 1
+      connectionCount[targetIndex] += 1
+
+      linePositions.push(
+        vectors[sourceIndex].x,
+        vectors[sourceIndex].y,
+        vectors[sourceIndex].z,
+        vectors[targetIndex].x,
+        vectors[targetIndex].y,
+        vectors[targetIndex].z,
+      )
+
+      const isFlagged = flaggedIndices.has(sourceIndex) || flaggedIndices.has(targetIndex)
+      const color = new THREE.Color(isFlagged ? 0xff7b66 : 0x85f6e8)
+
+      lineColors.push(color.r, color.g, color.b, color.r, color.g, color.b)
+    }
+  }
+
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(linePositions, 3))
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute(lineColors, 3))
+
+  return geometry
+}
+
+function createBackgroundPoints(count: number) {
+  const positions = new Float32Array(count * 3)
+
+  for (let index = 0; index < count; index += 1) {
+    positions[index * 3] = (Math.random() - 0.5) * 16
+    positions[index * 3 + 1] = (Math.random() - 0.5) * 10
+    positions[index * 3 + 2] = (Math.random() - 0.5) * 10
+  }
+
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+
+  return geometry
 }
 
 export function DashboardScene3D() {
@@ -47,8 +111,10 @@ export function DashboardScene3D() {
     }
 
     const scene = new THREE.Scene()
-    const camera = new THREE.PerspectiveCamera(34, 1, 0.1, 100)
-    camera.position.set(0, 0.35, 6.6)
+    scene.fog = new THREE.Fog(0x08111a, 10, 20)
+
+    const camera = new THREE.PerspectiveCamera(36, 1, 0.1, 100)
+    camera.position.set(0, 0, 8.4)
     camera.lookAt(0, 0, 0)
 
     const renderer = new THREE.WebGLRenderer({
@@ -59,149 +125,160 @@ export function DashboardScene3D() {
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.8))
     renderer.outputColorSpace = THREE.SRGBColorSpace
     renderer.toneMapping = THREE.ACESFilmicToneMapping
-    renderer.toneMappingExposure = 1.24
+    renderer.toneMappingExposure = 1.06
     host.appendChild(renderer.domElement)
 
-    const rootGroup = new THREE.Group()
-    rootGroup.scale.setScalar(1.12)
-    scene.add(rootGroup)
-    scene.fog = new THREE.Fog(0x07101a, 9, 16)
+    scene.add(new THREE.AmbientLight(0xe6fffa, 1.25))
 
-    const ambientLight = new THREE.AmbientLight(0xd7f6ff, 1.3)
-    scene.add(ambientLight)
+    const cyanLight = new THREE.PointLight(0x71f7ea, 34, 26, 1.5)
+    cyanLight.position.set(3.5, 2.6, 5.5)
+    scene.add(cyanLight)
 
-    const keyLight = new THREE.PointLight(0x4ff9d5, 28, 22, 1.6)
-    keyLight.position.set(4.5, 4, 6)
-    scene.add(keyLight)
+    const goldLight = new THREE.PointLight(0xffd07a, 18, 18, 1.7)
+    goldLight.position.set(-4.8, -2.3, 4.8)
+    scene.add(goldLight)
 
-    const rimLight = new THREE.PointLight(0xffdf86, 16, 18, 1.9)
-    rimLight.position.set(-5, -2, 4)
-    scene.add(rimLight)
+    const redLight = new THREE.PointLight(0xff816d, 10, 14, 1.9)
+    redLight.position.set(2.2, -2.4, 4)
+    scene.add(redLight)
 
-    const baseMaterial = new THREE.MeshPhysicalMaterial({
-      clearcoat: 1,
-      clearcoatRoughness: 0.16,
-      color: 0x1f4566,
-      emissive: 0x0e314b,
-      emissiveIntensity: 0.85,
-      metalness: 0.6,
-      roughness: 0.18,
-      sheen: 0.7,
-      sheenColor: new THREE.Color(0x74e7d4),
-      transmission: 0.1,
-    })
-    const glassMaterial = new THREE.MeshPhysicalMaterial({
-      clearcoat: 1,
-      clearcoatRoughness: 0.08,
-      color: 0xbafdf2,
-      emissive: 0x2fd0bc,
-      emissiveIntensity: 0.26,
-      metalness: 0.18,
-      opacity: 0.34,
-      roughness: 0.1,
-      transparent: true,
-      transmission: 0.78,
-    })
+    const backgroundPoints = new THREE.Points(
+      createBackgroundPoints(260),
+      new THREE.PointsMaterial({
+        color: 0xe8fffb,
+        opacity: 0.56,
+        size: 0.03,
+        transparent: true,
+      }),
+    )
+    scene.add(backgroundPoints)
 
-    const basePlate = createPlate(baseMaterial, 1)
-    basePlate.rotation.x = -0.95
-    basePlate.rotation.z = 0.22
-    basePlate.position.set(0, -1.05, 0)
-    rootGroup.add(basePlate)
+    const sphereRig = new THREE.Group()
+    scene.add(sphereRig)
 
-    const topPlate = createPlate(glassMaterial, 0.92)
-    topPlate.rotation.x = -0.95
-    topPlate.rotation.z = -0.18
-    topPlate.position.set(0.18, 1.05, 0.2)
-    rootGroup.add(topPlate)
-
-    const ring = new THREE.Mesh(
-      new THREE.TorusGeometry(2.2, 0.05, 24, 140),
+    const haloPrimary = new THREE.Mesh(
+      new THREE.TorusGeometry(2.9, 0.05, 22, 180),
       new THREE.MeshBasicMaterial({
-        color: 0x74e7d4,
-        opacity: 0.48,
+        color: 0x83f6e8,
+        opacity: 0.32,
         transparent: true,
       }),
     )
-    ring.rotation.x = 1.35
-    ring.rotation.z = 0.4
-    ring.position.set(0, 0.2, -0.4)
-    rootGroup.add(ring)
+    haloPrimary.rotation.x = 1.16
+    haloPrimary.rotation.z = 0.22
+    sphereRig.add(haloPrimary)
 
-    const wireframe = new THREE.LineSegments(
-      new THREE.EdgesGeometry(topPlate.geometry),
+    const haloSecondary = new THREE.Mesh(
+      new THREE.TorusGeometry(2.34, 0.026, 20, 160),
+      new THREE.MeshBasicMaterial({
+        color: 0xffd07a,
+        opacity: 0.24,
+        transparent: true,
+      }),
+    )
+    haloSecondary.rotation.x = 0.92
+    haloSecondary.rotation.z = -0.38
+    sphereRig.add(haloSecondary)
+
+    const sphereCore = new THREE.Mesh(
+      new THREE.SphereGeometry(0.42, 32, 32),
+      new THREE.MeshPhysicalMaterial({
+        clearcoat: 1,
+        clearcoatRoughness: 0.08,
+        color: 0xa4fff6,
+        emissive: 0x3fd1c3,
+        emissiveIntensity: 0.74,
+        metalness: 0.08,
+        roughness: 0.12,
+        transmission: 0.45,
+      }),
+    )
+    sphereRig.add(sphereCore)
+
+    const sphereGlow = new THREE.Mesh(
+      new THREE.SphereGeometry(0.64, 28, 28),
+      new THREE.MeshBasicMaterial({
+        color: 0x83f6e8,
+        opacity: 0.08,
+        transparent: true,
+      }),
+    )
+    sphereRig.add(sphereGlow)
+
+    const flaggedNodeIndices = new Set([14, 41, 92, 137, 166])
+    const { positions, vectors } = createSphereNodes(190, 1.92)
+
+    const networkPoints = new THREE.Points(
+      new THREE.BufferGeometry(),
+      new THREE.PointsMaterial({
+        color: 0xe5fffb,
+        opacity: 0.95,
+        size: 0.074,
+        transparent: true,
+      }),
+    )
+    networkPoints.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+    sphereRig.add(networkPoints)
+
+    const connectionLines = new THREE.LineSegments(
+      createConnectionGeometry(vectors, flaggedNodeIndices),
       new THREE.LineBasicMaterial({
-        color: 0xe7fbff,
-        opacity: 0.75,
+        opacity: 0.34,
         transparent: true,
+        vertexColors: true,
       }),
     )
-    wireframe.position.copy(topPlate.position)
-    wireframe.rotation.copy(topPlate.rotation)
-    rootGroup.add(wireframe)
+    sphereRig.add(connectionLines)
 
-    const barGroup = new THREE.Group()
-    const barColors = [0x74e7d4, 0xb0fff1, 0xffd07a, 0x6fd9ff]
+    const sphereShell = new THREE.Mesh(
+      new THREE.SphereGeometry(2.02, 22, 22),
+      new THREE.MeshBasicMaterial({
+        color: 0x9af9ec,
+        opacity: 0.045,
+        transparent: true,
+        wireframe: true,
+      }),
+    )
+    sphereRig.add(sphereShell)
 
-    for (const [index, color] of barColors.entries()) {
-      const bar = new THREE.Mesh(
-        new THREE.BoxGeometry(0.18, 0.48 + index * 0.2, 0.18),
-        new THREE.MeshStandardMaterial({
-          color,
-          emissive: color,
-          emissiveIntensity: 0.95,
-          metalness: 0.45,
-          roughness: 0.2,
+    const pulseOrbs: PulseOrb[] = []
+    const pulseMaterial = new THREE.MeshBasicMaterial({
+      color: 0xc9fff8,
+      opacity: 0.9,
+      transparent: true,
+    })
+
+    for (const [index, orbitRadius] of [2.45, 2.8, 3.05].entries()) {
+      const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.08, 18, 18), pulseMaterial.clone())
+      sphereRig.add(mesh)
+      pulseOrbs.push({
+        mesh,
+        orbitOffset: index * 2.1,
+        orbitRadius,
+        speed: 0.72 + index * 0.16,
+        tilt: 0.5 + index * 0.24,
+      })
+    }
+
+    const flareOrbs: FlareOrb[] = []
+    for (const flareIndex of flaggedNodeIndices) {
+      const vector = vectors[flareIndex]
+      const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(0.11, 18, 18),
+        new THREE.MeshBasicMaterial({
+          color: 0xff7b66,
+          opacity: 0.88,
+          transparent: true,
         }),
       )
 
-      bar.position.set(-0.65 + index * 0.42, 0.15 + index * 0.08, 1.06)
-      barGroup.add(bar)
+      mesh.position.copy(vector)
+      sphereRig.add(mesh)
+      flareOrbs.push({ mesh, offset: flareIndex * 0.13 })
     }
-
-    barGroup.rotation.x = -0.92
-    barGroup.rotation.z = 0.2
-    barGroup.position.set(-0.2, -0.3, 0)
-    rootGroup.add(barGroup)
-
-    const pointCount = 180
-    const pointPositions = new Float32Array(pointCount * 3)
-
-    for (let index = 0; index < pointCount; index += 1) {
-      const angle = (index / pointCount) * Math.PI * 2
-      const radius = 1.4 + Math.sin(index * 0.37) * 0.55
-      pointPositions[index * 3] = Math.cos(angle) * radius
-      pointPositions[index * 3 + 1] = (Math.random() - 0.5) * 2.4
-      pointPositions[index * 3 + 2] = Math.sin(angle) * radius
-    }
-
-    const pointsGeometry = new THREE.BufferGeometry()
-    pointsGeometry.setAttribute('position', new THREE.BufferAttribute(pointPositions, 3))
-    const points = new THREE.Points(
-      pointsGeometry,
-      new THREE.PointsMaterial({
-        color: 0xc5fff4,
-        size: 0.072,
-        transparent: true,
-        opacity: 0.82,
-      }),
-    )
-    points.rotation.x = 0.5
-    rootGroup.add(points)
-
-    const signalCore = new THREE.Mesh(
-      new THREE.SphereGeometry(0.18, 24, 24),
-      new THREE.MeshBasicMaterial({
-        color: 0x89fff0,
-        transparent: true,
-        opacity: 0.9,
-      }),
-    )
-    signalCore.position.set(0.05, 0.25, 1.15)
-    rootGroup.add(signalCore)
 
     const pointer = new THREE.Vector2(0, 0)
-    const clock = new THREE.Clock()
+    const startTime = performance.now()
 
     const handlePointerMove = (event: PointerEvent) => {
       const rect = host.getBoundingClientRect()
@@ -209,31 +286,66 @@ export function DashboardScene3D() {
       pointer.y = -(((event.clientY - rect.top) / rect.height) * 2 - 1)
     }
 
+    const handlePointerLeave = () => {
+      pointer.x = 0
+      pointer.y = 0
+    }
+
     const resize = () => {
       const { clientHeight, clientWidth } = host
       camera.aspect = clientWidth / clientHeight
       camera.updateProjectionMatrix()
       renderer.setSize(clientWidth, clientHeight, false)
+
+      sphereRig.position.x = clientWidth >= 1280 ? 1.48 : clientWidth >= 980 ? 1.16 : clientWidth >= 760 ? 0.76 : 0.4
+      sphereRig.position.y = clientWidth >= 980 ? 0.08 : clientWidth >= 760 ? 0.3 : 0.54
+
+      const scale = clientWidth >= 1280 ? 1.02 : clientWidth >= 980 ? 0.94 : clientWidth >= 760 ? 0.84 : 0.72
+      sphereRig.scale.setScalar(scale)
     }
 
     const resizeObserver = new ResizeObserver(() => resize())
     resizeObserver.observe(host)
     host.addEventListener('pointermove', handlePointerMove)
+    host.addEventListener('pointerleave', handlePointerLeave)
     resize()
 
     let frame = 0
 
     const animate = () => {
-      const elapsed = clock.getElapsedTime()
-      rootGroup.rotation.y = elapsed * 0.18 + pointer.x * 0.18
-      rootGroup.rotation.x = Math.sin(elapsed * 0.7) * 0.05 + pointer.y * 0.12
-      ring.rotation.z = elapsed * 0.36
-      points.rotation.y = -elapsed * 0.11
-      signalCore.scale.setScalar(1 + Math.sin(elapsed * 2.3) * 0.14)
-      topPlate.position.y = 1.05 + Math.sin(elapsed * 1.25) * 0.08
-      basePlate.position.y = -1.05 + Math.cos(elapsed * 0.85) * 0.05
-      wireframe.position.y = topPlate.position.y
-      barGroup.position.y = Math.sin(elapsed * 1.8) * 0.08 - 0.3
+      const elapsed = (performance.now() - startTime) / 1000
+
+      sphereRig.rotation.y = elapsed * 0.16 + pointer.x * 0.22
+      sphereRig.rotation.x = Math.sin(elapsed * 0.42) * 0.08 + pointer.y * 0.12
+
+      haloPrimary.rotation.z = elapsed * 0.18
+      haloSecondary.rotation.z = -elapsed * 0.14
+      backgroundPoints.rotation.y = elapsed * 0.012
+
+      sphereCore.rotation.y = elapsed * 0.8
+      sphereCore.rotation.x = elapsed * 0.38
+      sphereCore.scale.setScalar(1 + Math.sin(elapsed * 2.2) * 0.06)
+      sphereGlow.scale.setScalar(1 + Math.sin(elapsed * 1.4) * 0.08)
+      sphereShell.rotation.y = -elapsed * 0.22
+      sphereShell.rotation.x = elapsed * 0.11
+
+      for (const pulse of pulseOrbs) {
+        const pulseAngle = elapsed * pulse.speed + pulse.orbitOffset
+        pulse.mesh.position.set(
+          Math.cos(pulseAngle) * pulse.orbitRadius,
+          Math.sin(pulseAngle * pulse.tilt) * 0.95,
+          Math.sin(pulseAngle) * pulse.orbitRadius * 0.72,
+        )
+        pulse.mesh.scale.setScalar(1 + Math.sin(elapsed * 3 + pulse.orbitOffset) * 0.24)
+      }
+
+      for (const flare of flareOrbs) {
+        const intensity = 1 + Math.sin(elapsed * 3.8 + flare.offset) * 0.38
+        flare.mesh.scale.setScalar(intensity)
+        if (flare.mesh.material instanceof THREE.MeshBasicMaterial) {
+          flare.mesh.material.opacity = 0.52 + Math.sin(elapsed * 3.8 + flare.offset) * 0.18
+        }
+      }
 
       renderer.render(scene, camera)
       frame = requestAnimationFrame(animate)
@@ -248,17 +360,31 @@ export function DashboardScene3D() {
 
       resizeObserver.disconnect()
       host.removeEventListener('pointermove', handlePointerMove)
-      host.removeChild(renderer.domElement)
-      pointsGeometry.dispose()
-      signalCore.geometry.dispose()
-      signalCore.material.dispose()
+      host.removeEventListener('pointerleave', handlePointerLeave)
+
+      if (host.contains(renderer.domElement)) {
+        host.removeChild(renderer.domElement)
+      }
+
+      scene.traverse((object) => {
+        const geometry = (object as THREE.Mesh).geometry
+        if (geometry?.dispose) {
+          geometry.dispose()
+        }
+
+        const material = (object as THREE.Mesh).material
+        if (Array.isArray(material)) {
+          for (const entry of material) {
+            entry?.dispose?.()
+          }
+        } else {
+          material?.dispose?.()
+        }
+      })
+
       renderer.dispose()
-      basePlate.geometry.dispose()
-      topPlate.geometry.dispose()
-      ring.geometry.dispose()
-      wireframe.geometry.dispose()
     }
   }, [])
 
-  return <div ref={hostRef} className="relative h-[25rem] w-full" />
+  return <div ref={hostRef} className="relative h-full w-full" />
 }

@@ -49,6 +49,10 @@ class ExpenseReportLineItem(BaseModel):
     approval_recommendation: ReportApprovalRecommendationValue | None = None
     approval_recommendation_confidence: ReportApprovalRecommendationConfidence | None = None
     approval_recommendation_rationale: str | None = None
+    review_group_key: str | None = None
+    review_group_size: int = 1
+    review_group_total_amount_cad: float = 0
+    review_group_transaction_ids: list[str] = Field(default_factory=list)
     business_purpose: str | None = None
     guest_names: list[str] = Field(default_factory=list)
 
@@ -140,6 +144,24 @@ class ReportPlanTarget(BaseModel):
     requested_label: str
     resolved_label: str
     report_count: int = 1
+
+
+class ReportScopeEmployeeOption(BaseModel):
+    id: str
+    full_name: str
+    department_id: str | None = None
+    department_name: str | None = None
+
+
+class ReportScopeDepartmentOption(BaseModel):
+    id: str
+    name: str
+
+
+class ReportScopeOptionsResponse(BaseModel):
+    employees: list[ReportScopeEmployeeOption] = Field(default_factory=list)
+    departments: list[ReportScopeDepartmentOption] = Field(default_factory=list)
+    latest_transaction_date: str | None = None
 
 
 class ReportGenerateResponse(BaseModel):

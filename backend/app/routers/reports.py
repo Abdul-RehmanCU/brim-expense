@@ -1,12 +1,19 @@
 from fastapi import APIRouter, Query, Response
 
 from app.schemas.common import PlaceholderResponse
-from app.schemas.reports import ExpenseReportDetail, ExpenseReportListResponse, ReportGenerateRequest, ReportGenerateResponse
+from app.schemas.reports import (
+    ExpenseReportDetail,
+    ExpenseReportListResponse,
+    ReportGenerateRequest,
+    ReportGenerateResponse,
+    ReportScopeOptionsResponse,
+)
 from app.services.reports_service import (
     export_report_csv,
     generate_reports,
     get_report,
     get_reports_status,
+    list_report_scope_options,
     list_reports,
 )
 
@@ -16,6 +23,11 @@ router = APIRouter(prefix="/reports", tags=["reports"])
 @router.get("/status", response_model=PlaceholderResponse)
 def reports_status() -> PlaceholderResponse:
     return get_reports_status()
+
+
+@router.get("/scope-options", response_model=ReportScopeOptionsResponse)
+def reports_scope_options() -> ReportScopeOptionsResponse:
+    return list_report_scope_options()
 
 
 @router.post("/generate", response_model=ReportGenerateResponse)

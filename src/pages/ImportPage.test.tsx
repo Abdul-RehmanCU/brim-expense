@@ -48,7 +48,6 @@ vi.mock('@/lib/ui/preferences', () => ({
         'import.dataSourceHint': 'Comma or tab-delimited data',
         'import.csvText': 'CSV text',
         'import.placeholder': 'Paste CSV or TSV rows here',
-        'actions.preview': 'Preview',
         'actions.import': 'Import',
         'import.statusTitle': 'Import status',
         'import.rowsReady': 'Rows ready',
@@ -61,6 +60,10 @@ vi.mock('@/lib/ui/preferences', () => ({
         'import.errorsTitle': 'Row errors',
         'import.previewTitle': 'Preview',
         'import.previewBody': 'Check the cleaned-up rows before you bring them in.',
+        'import.previewRowsLabel': 'Preview rows',
+        'import.readinessLabel': 'Import readiness',
+        'import.readinessNeedsAttention': 'Needs attention',
+        'import.readinessReady': 'Ready',
         'import.row': 'Row',
         'import.date': 'Date',
         'import.merchant': 'Merchant',
@@ -69,6 +72,8 @@ vi.mock('@/lib/ui/preferences', () => ({
         'import.syntheticEmployee': 'Assigned employee',
         'import.fingerprint': 'Fingerprint',
         'import.unassigned': 'Unassigned',
+        'import.sourceLabel': 'Source',
+        'import.sourcePasted': 'Pasted CSV text',
         'transactions.syntheticDepartment': 'Synthetic Department',
       }
 
@@ -181,8 +186,6 @@ describe('ImportPage', () => {
     fireEvent.change(screen.getByPlaceholderText('Paste CSV or TSV rows here'), {
       target: { value: 'csv rows' },
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Preview' }))
-
     await waitFor(() => expect(backendMocks.validateTransactionDataQuality).toHaveBeenCalledTimes(1))
     expect(backendMocks.validateTransactionDataQuality).toHaveBeenCalledWith({
       rows: [
@@ -212,7 +215,7 @@ describe('ImportPage', () => {
     })
 
     expect(await screen.findByText('Import complete')).toBeTruthy()
-    expect(screen.getByText('Backend findings: 0')).toBeTruthy()
+    expect(screen.getByText('Import readiness: Ready')).toBeTruthy()
   })
 })
 

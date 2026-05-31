@@ -14,12 +14,19 @@ if "postgrest.exceptions" not in sys.modules:
     sys.modules["postgrest.exceptions"] = exceptions_module
 
 from app.schemas.approvals import (
+    ApprovalExplanation,
     ApprovalContextSnapshot,
+    ApprovalDecisionRequest,
     ApprovalRecommendation,
     DepartmentBudgetStatus,
     EmployeeSpendHistory,
 )
-from app.services.approvals_service import approval_recommendation_from_row, compose_approval_recommendation
+from app.services import approvals_service
+from app.services.approvals_service import (
+    approval_recommendation_from_row,
+    build_approval_explanation,
+    compose_approval_recommendation,
+)
 
 
 def test_approval_recommendation_requests_information_for_missing_preapproval() -> None:
@@ -119,6 +126,118 @@ def test_legacy_request_information_recommendation_reads_as_deny() -> None:
     assert recommendation.missing_information == ["manager approval"]
 
 
+def test_approval_explanation_highlights_missing_context_and_reversal_path() -> None:
+    snapshot = approval_snapshot(
+        policy={
+            "status": "approval_evidence_needed",
+            "missing_information": ["manager pre-authorization evidence"],
+            "flags": [
+                {
+                    "rule_code": "PREAPPROVAL_OVER_50",
+                    "severity": "high",
+                    "explanation": "Amount exceeds threshold.",
+                    "required_action": "Collect preapproval.",
+                }
+            ],
+        }
+    )
+    explanation = build_approval_explanation(
+        item=approval_item(ai_recommendation=compose_approval_recommendation(snapshot), policy_status="approval_evidence_needed"),
+        snapshot=snapshot,
+        reviewer_brief=None,
+    )
+
+    assert explanation
+    assert explanation.decision == "deny"
+    assert explanation.blocking_reasons
+    assert explanation.blocking_reasons[0].label == "Missing required context"
+    assert "manager pre-authorization evidence" in explanation.missing_information
+    assert "Collect preapproval." in explanation.would_change_outcome_if
+
+
+def test_approval_explanation_for_clean_packet_reads_as_approve() -> None:
+    snapshot = approval_snapshot()
+    explanation = build_approval_explanation(
+        item=approval_item(ai_recommendation=compose_approval_recommendation(snapshot), policy_status="compliant", risk_level="low"),
+        snapshot=snapshot,
+        reviewer_brief=None,
+    )
+
+    assert explanation
+    assert explanation.decision == "approve"
+    assert explanation.blocking_reasons == []
+    assert explanation.would_change_outcome_if == ["No blocking policy, risk, or budget condition is currently attached to this packet."]
+    assert explanation.supporting_evidence
+
+
+def test_decide_approval_cascades_decision_to_review_cluster(monkeypatch) -> None:
+    existing = {
+        "id": "approval_1",
+        "transaction_id": "txn_1",
+        "employee_id": "employee_1",
+        "department_id": "department_1",
+        "status": "requested",
+        "requested_amount_cad": 120,
+        "created_at": "2026-05-01T00:00:00Z",
+    }
+    cluster_transactions = [
+        {
+            "id": "txn_1",
+            "employee_id": "employee_1",
+            "department_id": "department_1",
+            "transaction_date": "2026-05-01",
+            "normalized_merchant_name": "DUPLICATE MERCHANT",
+            "amount_cad": 120,
+            "business_category": "Software",
+        },
+        {
+            "id": "txn_2",
+            "employee_id": "employee_1",
+            "department_id": "department_1",
+            "transaction_date": "2026-05-01",
+            "normalized_merchant_name": "DUPLICATE MERCHANT",
+            "amount_cad": 120,
+            "business_category": "Software",
+        },
+    ]
+    cluster_approvals = [
+        existing,
+        {**existing, "id": "approval_2", "transaction_id": "txn_2"},
+    ]
+    client = FakeApprovalDecisionClient()
+    preapproval_updates = []
+    queue_updates = []
+    audit_events = []
+
+    monkeypatch.setattr(approvals_service, "get_supabase_client", lambda: client)
+    monkeypatch.setattr(approvals_service, "fetch_one_by_id", lambda table_name, row_id, columns: existing if table_name == "approval_requests" else None)
+    monkeypatch.setattr(approvals_service, "fetch_review_cluster_transactions_for_transaction_id", lambda transaction_id: cluster_transactions)
+    monkeypatch.setattr(
+        approvals_service,
+        "fetch_rows_by_values",
+        lambda table_name, column_name, values, columns: cluster_approvals if table_name == "approval_requests" else [],
+    )
+    monkeypatch.setattr(
+        approvals_service,
+        "update_preapproval_from_decision",
+        lambda approval, request, decided_at: preapproval_updates.append((approval["transaction_id"], request.decision)),
+    )
+    monkeypatch.setattr(approvals_service, "update_review_queue_status", lambda transaction_id, status: queue_updates.append((transaction_id, status)))
+    monkeypatch.setattr(approvals_service, "insert_audit_event", lambda **kwargs: audit_events.append(kwargs))
+    monkeypatch.setattr(approvals_service, "get_approval", lambda approval_id: approval_id)
+
+    result = approvals_service.decide_approval(
+        "approval_1",
+        ApprovalDecisionRequest(decision="denied", actor="Maya Patel", note="Duplicate cluster."),
+    )
+
+    assert result == "approval_1"
+    assert client.updated_ids == ["approval_1", "approval_2"]
+    assert preapproval_updates == [("txn_1", "denied"), ("txn_2", "denied")]
+    assert queue_updates == [("txn_1", "resolved"), ("txn_2", "resolved")]
+    assert [event["entity_id"] for event in audit_events] == ["approval_1", "approval_2"]
+
+
 def approval_snapshot(**overrides):
     values = {
         "transaction": {"id": "txn_1", "merchant": "Conference Demo", "amount_cad": 1200},
@@ -150,3 +269,70 @@ def approval_snapshot(**overrides):
     }
     values.update(overrides)
     return ApprovalContextSnapshot(**values)
+
+
+def approval_item(**overrides):
+    values = {
+        "id": "approval_1",
+        "transaction_id": "txn_1",
+        "employee_id": "employee_1",
+        "employee_name": "Sarah Chen",
+        "department_id": "department_1",
+        "department_name": "Marketing",
+        "approver_name": "Maya Patel",
+        "status": "requested",
+        "requested_amount_cad": 1200,
+        "transaction_date": "2026-05-30",
+        "merchant": "Conference Demo",
+        "category": "Events / Conference",
+        "policy_check_id": "policy_1",
+        "policy_status": "compliant",
+        "policy_severity": "low",
+        "policy_flags": [],
+        "risk_score_id": "risk_1",
+        "risk_score": 12,
+        "risk_level": "low",
+        "risk_signals": [],
+        "ai_recommendation": None,
+        "reviewer_brief": None,
+        "budget_status": None,
+        "spend_history": None,
+        "requester_note": None,
+        "decision_note": None,
+        "decided_by": None,
+        "decided_at": None,
+        "created_at": None,
+        "updated_at": None,
+    }
+    values.update(overrides)
+    from app.schemas.approvals import ApprovalRequestItem
+
+    return ApprovalRequestItem(**values)
+
+
+class FakeApprovalDecisionClient:
+    def __init__(self):
+        self.updated_ids = []
+
+    def table(self, table_name):
+        assert table_name == "approval_requests"
+        return FakeApprovalDecisionQuery(self)
+
+
+class FakeApprovalDecisionQuery:
+    def __init__(self, client):
+        self.client = client
+        self.update_payload = None
+
+    def update(self, payload):
+        self.update_payload = payload
+        return self
+
+    def eq(self, column, value):
+        assert column == "id"
+        assert self.update_payload["status"] == "denied"
+        self.client.updated_ids.append(value)
+        return self
+
+    def execute(self):
+        return types.SimpleNamespace(data=[])

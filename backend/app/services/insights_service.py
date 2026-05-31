@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import date, timedelta
 from typing import Any, Literal
@@ -91,9 +92,19 @@ KNOWN_DEPARTMENTS = (
     "Customer Success",
     "Executive",
 )
+DEPARTMENT_ALIASES = {
+    "Marketing": ("marketing", "marketing team", "marketing teams"),
+    "Engineering": ("engineering", "engineer", "engineering team", "engineering teams", "engineer team", "engineer teams"),
+    "Sales": ("sales", "sales team", "sales teams"),
+    "Operations": ("operations", "operations team", "operations teams", "ops", "ops team", "ops teams"),
+    "Finance": ("finance", "finance team", "finance teams", "fin team", "fin teams"),
+    "HR": ("hr", "human resources", "hr team", "hr teams"),
+    "Customer Success": ("customer success", "customer success team", "customer success teams", "cs team", "cs teams"),
+    "Executive": ("executive", "executive team", "executive teams", "leadership"),
+}
 FOLLOW_UP_HINTS = (" now ", " only ", " just ", " those", " that ", " same ", " what about ", " narrow ", " filter ")
 REVIEW_QUEUE_TERMS = ("review queue", "flagged", "critical", "review item", "triage", "needs review")
-CHART_REQUEST_TERMS = (" chart ", " graph ", " plot ", " visualize ", " visualise ")
+CHART_REQUEST_TERMS = (" chart ", " charts ", " graph ", " graphs ", " plot ", " plots ", " visualize ", " visualise ", " visualization ", " visualisation ")
 TIME_SERIES_TERMS = (" by month ", " over time ", " trend ", " monthly ", " month by month ")
 TOP_TRANSACTION_TERMS = (
     " most expensive ",
@@ -109,10 +120,14 @@ TABLE_REFERENCE_TERMS = (" this table ", " this list ", " visible table ", " on 
 PAGE_EXPLANATION_TERMS = (
     "what am i looking at",
     "what am i seeing",
+    "what page am i on",
+    "what page is this",
+    "what am i on",
     "what is this page",
     "what does this page show",
     "what is this screen",
     "what am i looking at here",
+    "what is being described",
     "explain this page",
     "explain this screen",
     "what is going on here",
@@ -209,7 +224,8 @@ class AnthropicInsightPlannerClient:
                 "Return strict JSON only with no markdown fences or prose. "
                 "Select only from approved tools, dimensions, metrics, and filters. "
                 "Use conversation history to resolve follow-up questions. "
-                "You may use spend.sqlQuery only when the request cannot be expressed cleanly with the safer structured spend tools. "
+                "For open-ended analytics, follow-up questions, trend questions, comparisons, and chart requests, prefer spend.sqlQuery so you can interpret the user's intent directly. "
+                "Use the safer structured spend tools when the question is clearly a simple summary, top-transactions request, or straightforward grouped comparison that they already cover well. "
                 "When you use spend.sqlQuery, provide a single read-only PostgreSQL SELECT or WITH query in sql_statement. "
                 "Never emit mutating, administrative, multi-statement, commented, or privileged SQL. "
                 "Use policy.retrieveClauses when the user is asking what policy says, why a policy rule exists, "
@@ -234,11 +250,14 @@ class AnthropicInsightPlannerClient:
                             "known_departments": list(KNOWN_DEPARTMENTS),
                             "sql_schema_context": sql_query_service.allowed_sql_schema_context(),
                             "instructions": [
+                                "Treat this as a conversational analytics copilot, not a rigid classifier.",
+                                "For most Talk to Data analytical questions, prefer spend.sqlQuery so you can reason about the user's actual analytical intent and follow-up context.",
+                                "When you use spend.sqlQuery, alias chart and summary columns to canonical names whenever possible: label, sum_amount_cad, amount_cad, avg_amount_cad, transaction_count, month, department, merchant, employee, business_category.",
                                 "Prefer spend.compare when the question compares two departments.",
                                 "Prefer context.globalSummary when the user asks about overall app status, reports, approvals, policy setup, or cross-page summaries.",
                                 "Prefer spend.groupBy for grouped spend analysis.",
                                 "Prefer spend.topTransactions when the user asks for the biggest, most expensive, or top transaction rows.",
-                                "Use spend.sqlQuery for flexible read-only analysis that needs richer joins, aliases, or custom aggregation than the structured tools can express.",
+                                "Use spend.sqlQuery for flexible read-only analysis, especially when a natural-language follow-up changes the time range, comparison scope, or grouping.",
                                 "Prefer policy.latestFindings for aggregated policy questions.",
                                 "Prefer risk.latestSignals for transaction-level risk questions.",
                                 "Prefer policy.retrieveClauses for policy explanation or citation questions.",
@@ -330,46 +349,43 @@ def create_insight_plan(
     last_analysis_frame = _extract_last_analysis_frame(history)
     followup_plan = maybe_apply_followup_plan(request.question, request.mode, last_plan, last_analysis_frame)
     page_context_plan = maybe_create_page_context_plan(request.question, request.mode, resolved_page_context)
-    if followup_plan:
-        plan = apply_page_context_to_plan(followup_plan, resolved_page_context)
-        planner_source = "deterministic_followup"
-    elif page_context_plan:
-        plan = apply_page_context_to_plan(page_context_plan, resolved_page_context)
-        planner_source = "deterministic"
-    else:
-        base_plan = apply_page_context_to_plan(
-            deterministic_plan(
-                request.question,
-                request.mode,
-                last_plan=last_plan,
-                last_analysis_frame=last_analysis_frame,
-            ),
-            resolved_page_context,
-        )
-        plan = base_plan
-        planner_source = "deterministic"
-        if _should_try_ai_plan(request.question, plan, history):
-            try:
-                ai_plan = AnthropicInsightPlannerClient().create_plan(
-                    question=request.question,
-                    mode=request.mode,
-                    history=history,
-                    last_plan=last_plan,
-                    page_context=resolved_page_context,
-                    ask_context=ask_context,
-                )
-                ai_plan = apply_page_context_to_plan(ai_plan, resolved_page_context)
-                if validate_plan(ai_plan).valid:
-                    plan = ai_plan
-                    planner_source = "anthropic_structured"
-                else:
-                    plan = base_plan
-                    planner_source = "deterministic"
-            except Exception:
-                planner_source = "deterministic"
 
-    critic = critic_validate_plan(request.question, plan)
-    validation = validate_plan(plan)
+    base_plan, planner_source = _build_fallback_plan(
+        request.question,
+        request.mode,
+        resolved_page_context,
+        last_plan,
+        last_analysis_frame,
+        followup_plan,
+        page_context_plan,
+    )
+
+    if _ai_planner_available():
+        try:
+            ai_plan = AnthropicInsightPlannerClient().create_plan(
+                question=request.question,
+                mode=request.mode,
+                history=history,
+                last_plan=last_plan,
+                page_context=resolved_page_context,
+                ask_context=ask_context,
+            )
+            ai_plan = apply_page_context_to_plan(ai_plan, resolved_page_context)
+            if validate_plan(ai_plan).valid:
+                critic = critic_validate_plan(request.question, ai_plan)
+                validation = validate_plan(ai_plan)
+                return InsightPlanResponse(
+                    question=request.question,
+                    plan=ai_plan,
+                    critic=critic,
+                    validation=validation,
+                    planner_source="anthropic_structured",
+                )
+        except Exception:
+            pass
+    plan = base_plan
+    critic = critic_validate_plan(request.question, base_plan)
+    validation = validate_plan(base_plan)
     return InsightPlanResponse(
         question=request.question,
         plan=plan,
@@ -379,12 +395,41 @@ def create_insight_plan(
     )
 
 
+def _build_fallback_plan(
+    question: str,
+    mode: str | None,
+    page_context: InsightPageContext | None,
+    last_plan: InsightPlan | None,
+    last_analysis_frame: dict[str, Any] | None,
+    followup_plan: InsightPlan | None,
+    page_context_plan: InsightPlan | None,
+) -> tuple[InsightPlan, str]:
+    if followup_plan:
+        return apply_page_context_to_plan(followup_plan, page_context), "deterministic_followup"
+    if page_context_plan:
+        return apply_page_context_to_plan(page_context_plan, page_context), "deterministic"
+    return (
+        apply_page_context_to_plan(
+            deterministic_plan(
+                question,
+                mode,
+                last_plan=last_plan,
+                last_analysis_frame=last_analysis_frame,
+            ),
+            page_context,
+        ),
+        "deterministic",
+    )
+
+
 def query_insights(request: InsightQueryRequest) -> InsightQueryResponse:
     page_context = getattr(request, "page_context", None)
     session = _ensure_session(request.session_id, request.question, page_context)
     _persist_session_context(session.id, page_context)
     history = _load_session_messages(session.id, include_context_messages=True)
     resolved_page_context = page_context or _extract_latest_page_context(history)
+    last_plan = _extract_last_assistant_plan(history)
+    last_analysis_frame = _extract_last_analysis_frame(history)
     ask_context = ask_context_service.build_ask_context_envelope(
         page_context=resolved_page_context,
         history=history,
@@ -395,6 +440,9 @@ def query_insights(request: InsightQueryRequest) -> InsightQueryResponse:
         page_context=resolved_page_context,
         ask_context=ask_context,
     )
+    active_plan = plan_response.plan
+    active_validation = plan_response.validation
+    active_planner_source = plan_response.planner_source
     if not plan_response.critic.valid:
         blocked = _blocked_response(request.question, plan_response.plan, plan_response.critic, session.id)
         _persist_query_exchange(session.id, request.question, blocked, page_context=resolved_page_context)
@@ -404,28 +452,43 @@ def query_insights(request: InsightQueryRequest) -> InsightQueryResponse:
         _persist_query_exchange(session.id, request.question, blocked, page_context=resolved_page_context)
         return blocked
 
-    if plan_response.plan.tool == "context.globalSummary":
+    if active_plan.tool == "context.globalSummary":
         rows, metadata, citations = ask_context_service.execute_context_summary_tool(
-            plan_response.plan,
+            active_plan,
             ask_context,
             request.question,
         )
-    elif plan_response.plan.tool == "spend.sqlQuery":
+    elif active_plan.tool == "spend.sqlQuery":
         prepared_sql, sql_metadata = sql_query_service.validate_and_prepare_sql(
             question=request.question,
-            sql_statement=plan_response.plan.sql_statement or "",
+            sql_statement=active_plan.sql_statement or "",
             page_context=resolved_page_context,
             ask_context=ask_context.model_dump(mode="json"),
-            limit=plan_response.plan.limit,
+            limit=active_plan.limit,
         )
-        rows, metadata = sql_query_service.execute_read_only_sql(prepared_sql, plan_response.plan.limit)
+        rows, metadata = sql_query_service.execute_read_only_sql(prepared_sql, active_plan.limit)
         citations = []
         metadata = {**metadata, **sql_metadata}
+        if not sql_result_matches_question(request.question, rows):
+            fallback_plan = apply_page_context_to_plan(
+                deterministic_plan(
+                    request.question,
+                    request.mode,
+                    last_plan=last_plan,
+                    last_analysis_frame=last_analysis_frame,
+                ),
+                resolved_page_context,
+            )
+            if fallback_plan.tool != "spend.sqlQuery":
+                rows, metadata, citations = execute_insight_tool(fallback_plan, question=request.question, history=history)
+                active_plan = fallback_plan
+                active_validation = validate_plan(fallback_plan)
+                active_planner_source = "claude_fallback"
     else:
-        rows, metadata, citations = execute_insight_tool(plan_response.plan, question=request.question, history=history)
+        rows, metadata, citations = execute_insight_tool(active_plan, question=request.question, history=history)
     analysis_frame = build_analysis_frame(
         question=request.question,
-        plan=plan_response.plan,
+        plan=active_plan,
         rows=rows,
         page_context=resolved_page_context,
     )
@@ -433,20 +496,20 @@ def query_insights(request: InsightQueryRequest) -> InsightQueryResponse:
         metadata,
         resolved_page_context,
         ask_context,
-        plan_response.plan,
+        active_plan,
         citations,
         analysis_frame,
     )
-    fallback_summary = summarize_result(plan_response.plan, rows, metadata, citations)
+    fallback_summary = summarize_result(active_plan, rows, metadata, citations)
     response = InsightQueryResponse(
         question=request.question,
         session_id=session.id,
-        plan=plan_response.plan,
-        validation=plan_response.validation,
-        planner_source=plan_response.planner_source,
+        plan=active_plan,
+        validation=active_validation,
+        planner_source=active_planner_source,
         summary=compose_insight_response(
             question=request.question,
-            plan=plan_response.plan,
+            plan=active_plan,
             rows=rows,
             metadata=response_metadata,
             citations=citations,
@@ -458,7 +521,7 @@ def query_insights(request: InsightQueryRequest) -> InsightQueryResponse:
         columns=infer_columns(rows),
         rows=rows,
         citations=citations,
-        visualization=plan_response.plan.visualization,
+        visualization=active_plan.visualization,
         metadata=response_metadata,
     )
     _persist_query_exchange(session.id, request.question, response, page_context=resolved_page_context)
@@ -480,6 +543,8 @@ def deterministic_plan(
     period_filters = extract_relative_date_filters(normalized)
     time_series_requested = _wants_time_series(normalized) or (chart_requested and bool(period_filters))
     global_context_plan = maybe_create_global_context_plan(normalized, requested_mode)
+    comparison_targets = _resolve_comparison_targets(mentioned_departments, last_plan, last_analysis_frame)
+    effective_period_filters = period_filters or _previous_period_filters(last_plan, last_analysis_frame)
 
     if global_context_plan:
         return global_context_plan
@@ -523,49 +588,40 @@ def deterministic_plan(
             normalized,
             requested_mode,
             mentioned_departments,
+            last_plan=last_plan,
+            last_analysis_frame=last_analysis_frame,
             chart_requested=chart_requested,
         )
 
-    if comparison_requested and len(mentioned_departments) >= 2:
-        comparison_targets = mentioned_departments[:2]
-        focus_dimension = "month" if time_series_requested else "business_category" if category_breakdown_requested else "department"
+    if (comparison_requested and len(comparison_targets) >= 2) or _is_comparison_chart_request(normalized, comparison_targets):
+        focus_dimension = "month" if (time_series_requested or bool(effective_period_filters)) else "business_category" if category_breakdown_requested else "department"
         return InsightPlan(
             intent="department_spend_comparison",
-            mode="chart" if time_series_requested or chart_requested else "table" if requested_mode == "answer" else requested_mode,
+            mode="chart",
             tool="spend.compare",
-            filters={"department": comparison_targets, **period_filters},
+            filters={"department": comparison_targets[:2], **effective_period_filters},
             group_by=[focus_dimension],
             metrics=["sum_amount_cad", "transaction_count", "avg_amount_cad"],
             visualization="line" if focus_dimension == "month" else "bar",
             comparison_options={
                 "dimension": "department",
-                "targets": comparison_targets,
+                "targets": comparison_targets[:2],
                 "focus_dimension": focus_dimension,
             },
         )
 
-    if mentioned_departments and period_filters:
+    if mentioned_departments and effective_period_filters:
         department_filter = mentioned_departments if len(mentioned_departments) > 1 else mentioned_departments[0]
-        if time_series_requested:
-            return InsightPlan(
-                intent="department_spend_trend",
-                mode="chart",
-                tool="spend.groupBy",
-                filters={"department": department_filter, **period_filters},
-                group_by=["month"],
-                metrics=["sum_amount_cad", "transaction_count", "avg_amount_cad"],
-                sort=[{"field": "month", "direction": "asc"}],
-                limit=24,
-                visualization="line",
-            )
         return InsightPlan(
-            intent="department_spend_summary",
-            mode=requested_mode,
-            tool="spend.summary",
-            filters={"department": department_filter, **period_filters},
+            intent="department_spend_trend",
+            mode="chart",
+            tool="spend.groupBy",
+            filters={"department": department_filter, **effective_period_filters},
+            group_by=["month"],
             metrics=["sum_amount_cad", "transaction_count", "avg_amount_cad"],
-            sort=[{"field": "sum_amount_cad", "direction": "desc"}],
-            visualization="metric",
+            sort=[{"field": "month", "direction": "asc"}],
+            limit=24,
+            visualization="line",
         )
 
     if "marketing" in normalized and "category" in normalized:
@@ -693,6 +749,8 @@ def maybe_apply_followup_plan(
             normalized,
             mode or ("chart" if chart_requested else last_plan.mode),
             extract_departments(normalized),
+            last_plan=last_plan,
+            last_analysis_frame=last_analysis_frame,
             chart_requested=chart_requested,
         )
 
@@ -788,12 +846,36 @@ def _build_department_spend_followup_plan(
     requested_mode: str,
     mentioned_departments: list[str],
     *,
+    last_plan: InsightPlan | None = None,
+    last_analysis_frame: dict[str, Any] | None = None,
     chart_requested: bool,
 ) -> InsightPlan:
-    department_filter: str | list[str] = mentioned_departments if len(mentioned_departments) > 1 else mentioned_departments[0]
-    period_filters = extract_relative_date_filters(normalized_question)
-    time_series_requested = _wants_time_series(normalized_question) or (chart_requested and bool(period_filters))
+    department_targets = _resolve_comparison_targets(mentioned_departments, last_plan, last_analysis_frame)
+    period_filters = extract_relative_date_filters(normalized_question) or _previous_period_filters(last_plan, last_analysis_frame)
+    time_series_requested = _wants_time_series(normalized_question) or bool(period_filters) or chart_requested
     category_breakdown_requested = "category" in normalized_question
+    comparison_requested = _is_comparison_chart_request(normalized_question, department_targets)
+
+    if comparison_requested and len(department_targets) >= 2:
+        focus_dimension = "month" if time_series_requested else "business_category" if category_breakdown_requested else "department"
+        return InsightPlan(
+            intent="department_spend_comparison",
+            mode="chart",
+            tool="spend.compare",
+            filters={"department": department_targets[:2], **period_filters},
+            group_by=[focus_dimension],
+            metrics=["sum_amount_cad", "transaction_count", "avg_amount_cad"],
+            sort=[{"field": "month", "direction": "asc"}] if focus_dimension == "month" else [{"field": "sum_amount_cad", "direction": "desc"}],
+            limit=24 if focus_dimension == "month" else 100,
+            visualization="line" if focus_dimension == "month" else "bar",
+            comparison_options={
+                "dimension": "department",
+                "targets": department_targets[:2],
+                "focus_dimension": focus_dimension,
+            },
+        )
+
+    department_filter: str | list[str] = department_targets if len(department_targets) > 1 else department_targets[0]
 
     if time_series_requested:
         return InsightPlan(
@@ -885,6 +967,16 @@ def maybe_create_page_context_plan(
             limit=1,
             visualization="table",
             context_options={"summary_keys": ["policy_setup"]},
+        )
+
+    if route == "talktodata":
+        return InsightPlan(
+            intent="page_explanation",
+            mode="table" if requested_mode == "answer" else requested_mode,
+            tool="context.globalSummary",
+            limit=1,
+            visualization="table",
+            context_options={"summary_keys": []},
         )
 
     return None
@@ -1059,8 +1151,10 @@ def should_compose_with_ai(
         return True
     if page_context and _is_page_explanation_question(normalized):
         return True
+    if plan.tool.startswith("spend."):
+        return False
     if len(ask_context.context_scope) >= 3 and any(
-        term in normalized for term in ("summary", "overview", "report", "approval", "policy setup", "what should", "what are")
+        term in normalized for term in ("summary", "overview", "report", "approval", "policy setup", "what should")
     ):
         return True
     return False
@@ -1073,6 +1167,9 @@ def summarize_contextual_response(
     ask_context: AskContextEnvelope,
     fallback_summary: str,
 ) -> str:
+    normalized = f" {question.lower().strip()} "
+    if page_context and _is_page_explanation_question(normalized):
+        return summarize_page_context_response(question, page_context, fallback_summary)
     if plan.tool == "context.globalSummary":
         return summarize_global_ask_context_response(ask_context, plan, fallback_summary)
     return summarize_page_context_response(question, page_context, fallback_summary)
@@ -1263,11 +1360,13 @@ def _has_report_scope(plan: InsightPlan) -> bool:
 
 
 def extract_departments(normalized_question: str) -> list[str]:
-    return [
-        department
-        for department in KNOWN_DEPARTMENTS
-        if re.search(rf"\b{re.escape(department.lower())}\b", normalized_question)
-    ]
+    haystack = _phrase_match_text(normalized_question)
+    matched_departments: list[str] = []
+    for department in KNOWN_DEPARTMENTS:
+        aliases = DEPARTMENT_ALIASES.get(department, (department.lower(),))
+        if any(f" {alias} " in haystack for alias in aliases):
+            matched_departments.append(department)
+    return matched_departments
 
 
 def wants_comparison(normalized_question: str) -> bool:
@@ -1330,15 +1429,80 @@ def _looks_like_contextual_followup(
     return bool(last_analysis_frame.get("analysis_kind") and len(normalized_question.split()) <= 8)
 
 
+def _resolve_comparison_targets(
+    mentioned_departments: list[str],
+    last_plan: InsightPlan | None,
+    last_analysis_frame: dict[str, Any] | None,
+) -> list[str]:
+    targets: list[str] = []
+    previous_targets = _previous_department_targets(last_plan, last_analysis_frame)
+    for department in [*previous_targets, *mentioned_departments]:
+        if department and department not in targets:
+            targets.append(department)
+    return targets
+
+
+def _previous_department_targets(last_plan: InsightPlan | None, last_analysis_frame: dict[str, Any] | None) -> list[str]:
+    frame_targets = (last_analysis_frame or {}).get("comparison_targets")
+    if isinstance(frame_targets, list):
+        clean_targets = [str(target) for target in frame_targets if str(target).strip()]
+        if clean_targets:
+            return clean_targets
+    frame_filters = (last_analysis_frame or {}).get("filters")
+    if isinstance(frame_filters, dict):
+        frame_department = frame_filters.get("department")
+        if isinstance(frame_department, list):
+            clean_targets = [str(target) for target in frame_department if str(target).strip()]
+            if clean_targets:
+                return clean_targets
+        if isinstance(frame_department, str) and frame_department.strip():
+            return [frame_department]
+    if last_plan:
+        last_department = last_plan.filters.get("department")
+        if isinstance(last_department, list):
+            return [str(target) for target in last_department if str(target).strip()]
+        if isinstance(last_department, str) and last_department.strip():
+            return [last_department]
+    return []
+
+
+def _previous_period_filters(last_plan: InsightPlan | None, last_analysis_frame: dict[str, Any] | None) -> dict[str, str]:
+    candidate_filters: list[dict[str, Any]] = []
+    if isinstance((last_analysis_frame or {}).get("filters"), dict):
+        candidate_filters.append((last_analysis_frame or {}).get("filters"))
+    if last_plan:
+        candidate_filters.append(last_plan.filters)
+    for filters in candidate_filters:
+        date_start = filters.get("date_start")
+        date_end = filters.get("date_end")
+        if isinstance(date_start, str) and isinstance(date_end, str) and date_start and date_end:
+            return {"date_start": date_start, "date_end": date_end}
+    return {}
+
+
+def _is_comparison_chart_request(normalized_question: str, comparison_targets: list[str]) -> bool:
+    haystack = _phrase_match_text(normalized_question)
+    if len(comparison_targets) < 2:
+        return False
+    if wants_comparison(normalized_question):
+        return True
+    return any(term in haystack for term in (" both ", " difference ", " differences ", " compare ", " comparison "))
+
+
 def _is_department_spend_followup(
     normalized_question: str,
     last_plan: InsightPlan | None,
     last_analysis_frame: dict[str, Any] | None,
 ) -> bool:
     mentioned_departments = extract_departments(normalized_question)
+    previous_targets = _previous_department_targets(last_plan, last_analysis_frame)
+    haystack = _phrase_match_text(normalized_question)
+    if not mentioned_departments and len(previous_targets) >= 2 and any(
+        term in haystack for term in (" both ", " chart ", " charts ", " graph ", " compare ", " difference ", " differences ")
+    ):
+        return True
     if not mentioned_departments:
         return False
-    haystack = _phrase_match_text(normalized_question)
     if any(term in haystack for term in (" spend ", " spending ", " expense ", " expenses ")):
         return True
     if not last_plan and not last_analysis_frame:
@@ -1363,6 +1527,21 @@ def _extract_requested_limit(normalized_question: str, default: int) -> int:
 def extract_relative_date_filters(normalized_question: str, today: date | None = None) -> dict[str, str]:
     current_day = today or date.today()
     haystack = _phrase_match_text(normalized_question)
+    rolling_day_match = re.search(r"\b(?:past|last)\s+(\d{1,3})\s*days?\b", haystack)
+    if rolling_day_match:
+        day_count = max(1, int(rolling_day_match.group(1)))
+        start = current_day - timedelta(days=day_count - 1)
+        return {"date_start": start.isoformat(), "date_end": current_day.isoformat()}
+    rolling_week_match = re.search(r"\b(?:past|last)\s+(\d{1,3})\s*weeks?\b", haystack)
+    if rolling_week_match:
+        week_count = max(1, int(rolling_week_match.group(1)))
+        start = current_day - timedelta(days=week_count * 7 - 1)
+        return {"date_start": start.isoformat(), "date_end": current_day.isoformat()}
+    rolling_month_match = re.search(r"\b(?:past|last)\s+(\d{1,2})\s*months?\b", haystack)
+    if rolling_month_match:
+        month_count = max(1, int(rolling_month_match.group(1)))
+        start, end = _rolling_month_date_range(current_day, month_count)
+        return {"date_start": start.isoformat(), "date_end": end.isoformat()}
     if " last quarter " in haystack:
         start, end = _quarter_date_range(current_day, offset=-1)
         return {"date_start": start.isoformat(), "date_end": end.isoformat()}
@@ -1410,6 +1589,11 @@ def _month_date_range(current_day: date, offset: int) -> tuple[date, date]:
     else:
         end = date(year, month + 1, 1) - timedelta(days=1)
     return start, end
+
+
+def _rolling_month_date_range(current_day: date, month_count: int) -> tuple[date, date]:
+    start, _ = _month_date_range(current_day, offset=-(month_count - 1))
+    return start, current_day
 
 
 def _phrase_match_text(value: str) -> str:
@@ -1565,8 +1749,12 @@ def summarize_sql_result(plan: InsightPlan, rows: list[Any], metadata: dict[str,
 
     first = rows[0]
     amount_value = first.values.get("amount_cad") or first.values.get("sum_amount_cad") or first.values.get("avg_amount_cad")
-    if len(rows) == 1 and isinstance(amount_value, (int, float)):
-        return f"{first.label}: CAD {float(amount_value):,.2f}."
+    if len(rows) == 1:
+        count_value = first.values.get("transaction_count")
+        if isinstance(amount_value, (int, float)) and isinstance(count_value, (int, float)):
+            return f"{first.label} totaled CAD {float(amount_value):,.2f} across {int(count_value):,} transaction(s)."
+        if isinstance(amount_value, (int, float)):
+            return f"{first.label}: CAD {float(amount_value):,.2f}."
 
     if isinstance(amount_value, (int, float)):
         prefix = f"Returned {metadata.get('returned_count', len(rows)):,} row(s)."
@@ -1575,6 +1763,27 @@ def summarize_sql_result(plan: InsightPlan, rows: list[Any], metadata: dict[str,
         return f"{prefix} Top result is {first.label} at CAD {float(amount_value):,.2f}."
 
     return f"Returned {metadata.get('returned_count', len(rows)):,} row(s) from the validated SQL query."
+
+
+def sql_result_matches_question(question: str, rows: list[Any]) -> bool:
+    if not rows:
+        return True
+    normalized = _phrase_match_text(question)
+    numeric_keys = {
+        key
+        for row in rows[:5]
+        for key, value in getattr(row, "values", {}).items()
+        if isinstance(value, (int, float))
+    }
+    wants_spend = any(term in normalized for term in (" spend ", " spending ", " expense ", " expenses ", " amount ", " amounts ", " cost ", " costs "))
+    wants_count = any(term in normalized for term in (" count ", " counts ", " transaction ", " transactions ", " how many "))
+    has_amount_metric = any(key in numeric_keys for key in ("sum_amount_cad", "amount_cad", "avg_amount_cad"))
+    has_count_metric = "transaction_count" in numeric_keys
+    if wants_spend and not has_amount_metric:
+        return False
+    if wants_count and not (has_count_metric or has_amount_metric):
+        return False
+    return True
 
 
 def summarize_global_context_result(rows: list[Any], metadata: dict[str, Any]) -> str:
@@ -1885,35 +2094,10 @@ def _extract_latest_page_context(messages: list[InsightChatMessage]) -> InsightP
     return None
 
 
-def _should_try_ai_plan(question: str, plan: InsightPlan, history: list[InsightChatMessage]) -> bool:
-    normalized = f" {question.lower().strip()} "
-    if any(hint in normalized for hint in FOLLOW_UP_HINTS):
-        return True
-    if _is_policy_retrieval_question(normalized, _extract_last_assistant_plan(history)):
-        return True
-    if _wants_top_transactions(normalized) or any(term in _phrase_match_text(normalized) for term in TABLE_REFERENCE_TERMS):
-        return True
-    return plan.intent == "spend_summary" and any(
-        term in normalized
-        for term in [
-            "policy",
-            "risk",
-            "merchant",
-            "category",
-            "compare",
-            "review queue",
-            "flagged",
-            "critical",
-            "chart",
-            "graph",
-            "quarter",
-            "table",
-            "reports",
-            "approvals",
-            "system status",
-            "overview",
-        ]
-    )
+def _ai_planner_available() -> bool:
+    if os.environ.get("PYTEST_CURRENT_TEST") and not os.environ.get("ALLOW_LIVE_AI_PLANNER_TESTS"):
+        return False
+    return bool(get_settings().anthropic_api_key)
 
 
 def _is_policy_retrieval_question(normalized_question: str, last_plan: InsightPlan | None) -> bool:

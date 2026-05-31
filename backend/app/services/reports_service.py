@@ -26,6 +26,9 @@ from app.schemas.reports import (
     ReportMetric,
     ReportNarrative,
     ReportPlanTarget,
+    ReportScopeDepartmentOption,
+    ReportScopeEmployeeOption,
+    ReportScopeOptionsResponse,
     ReportSpec,
     ReportVisualResult,
     ReportVisualRow,
@@ -38,6 +41,7 @@ from app.services.approvals_service import approval_recommendation_from_row, cre
 from app.services.ai_service import AnthropicJsonClient, default_report_narrative_client
 from app.services.rag_service import retrieve_policy_chunks
 from app.services.policy_service import scan_transactions as scan_policy_transactions
+from app.services.review_grouping import annotate_review_clusters, review_group_key_from_transaction, review_group_key_from_values
 from app.services.review_queue_service import (
     fetch_policy_citations_by_rule_code,
     policy_citations_for_flags,
@@ -128,6 +132,43 @@ def get_reports_status() -> PlaceholderResponse:
         service="reports",
         implemented=True,
         message="Expense report generation, detail, listing, and CSV export are available.",
+    )
+
+
+def list_report_scope_options() -> ReportScopeOptionsResponse:
+    client = get_supabase_client()
+    employee_rows = client.table("employees").select("id, full_name, department_id").order("full_name").execute().data or []
+    department_rows = client.table("departments").select("id, name").order("name").execute().data or []
+    latest_transaction_rows = (
+        client.table("transactions").select("transaction_date").not_.is_("transaction_date", "null").order("transaction_date", desc=True).limit(1).execute().data
+        or []
+    )
+    department_name_by_id = {
+        str(department.get("id") or ""): str(department.get("name") or "")
+        for department in department_rows
+        if department.get("id")
+    }
+
+    return ReportScopeOptionsResponse(
+        employees=[
+            ReportScopeEmployeeOption(
+                id=str(employee.get("id") or ""),
+                full_name=str(employee.get("full_name") or "Unknown employee"),
+                department_id=str(employee.get("department_id") or "") or None,
+                department_name=department_name_by_id.get(str(employee.get("department_id") or "")) or None,
+            )
+            for employee in employee_rows
+            if employee.get("id")
+        ],
+        departments=[
+            ReportScopeDepartmentOption(
+                id=str(department.get("id") or ""),
+                name=str(department.get("name") or "Unknown department"),
+            )
+            for department in department_rows
+            if department.get("id")
+        ],
+        latest_transaction_date=str(latest_transaction_rows[0].get("transaction_date") or "") or None,
     )
 
 
@@ -331,6 +372,7 @@ def generate_report_for_scope(
         approvals_by_transaction_id,
         review_queue_by_transaction_id,
     )
+    line_items = annotate_review_clusters(line_items)
     total_amount_cad = round(sum(item.amount_cad for item in line_items), 2)
     workflow_metrics = summarize_report_workflow_metrics(
         transactions,
@@ -489,7 +531,7 @@ def get_report(report_id: str) -> ExpenseReportDetail:
     employee = fetch_one_by_id(client, "employees", str(report.get("employee_id") or ""))
     department = fetch_one_by_id(client, "departments", str(report.get("department_id") or ""))
 
-    line_items = [
+    line_items = annotate_review_clusters([
         compose_line_item_from_report_item(
             item,
             transactions_by_id.get(str(item.get("transaction_id") or "")),
@@ -501,7 +543,7 @@ def get_report(report_id: str) -> ExpenseReportDetail:
             evidence["review_queue"].get(str(item.get("transaction_id") or "")),
         )
         for item in item_rows
-    ]
+    ])
     workflow_metrics = summarize_report_workflow_metrics(
         [transactions_by_id[transaction_id] for transaction_id in transaction_ids if transaction_id in transactions_by_id],
         evidence["policy"],
@@ -1715,6 +1757,10 @@ def compose_line_items(
                 approval_recommendation=recommendation.recommendation if recommendation else None,
                 approval_recommendation_confidence=recommendation.confidence if recommendation else None,
                 approval_recommendation_rationale=recommendation.rationale if recommendation else None,
+                review_group_key=review_group_key_from_transaction(transaction),
+                review_group_size=1,
+                review_group_total_amount_cad=float(transaction.get("amount_cad") or 0),
+                review_group_transaction_ids=[transaction_id],
                 business_purpose=string_or_none(transaction.get("business_purpose")),
                 guest_names=[str(value) for value in transaction.get("guest_names") or [] if str(value).strip()],
             )
@@ -1764,6 +1810,21 @@ def compose_line_item_from_report_item(
         approval_recommendation=recommendation.recommendation if recommendation else None,
         approval_recommendation_confidence=recommendation.confidence if recommendation else None,
         approval_recommendation_rationale=recommendation.rationale if recommendation else None,
+        review_group_key=(
+            review_group_key_from_transaction(transaction)
+            if transaction.get("id")
+            else review_group_key_from_values(
+                transaction_id=str(item.get("transaction_id") or ""),
+                employee_id=string_or_none(transaction.get("employee_id")),
+                department_id=string_or_none(transaction.get("department_id")),
+                merchant=string_or_none(transaction.get("normalized_merchant_name") or transaction.get("merchant_name")),
+                transaction_date=string_or_none(transaction.get("transaction_date")),
+                category=string_or_none(item.get("category") or transaction.get("business_category") or transaction.get("normalized_category")),
+            )
+        ),
+        review_group_size=1,
+        review_group_total_amount_cad=float(item.get("amount_cad") or transaction.get("amount_cad") or 0),
+        review_group_transaction_ids=[str(item["transaction_id"])],
         business_purpose=string_or_none(transaction.get("business_purpose")),
         guest_names=[str(value) for value in transaction.get("guest_names") or [] if str(value).strip()],
     )

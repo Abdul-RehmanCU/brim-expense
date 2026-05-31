@@ -654,10 +654,9 @@ Build these pages:
 3. Talk to Data
 4. Transactions
 5. Compliance
-6. Risk Radar
-7. Approvals
-8. Reports
-9. Policy Rules
+6. Approvals
+7. Reports
+8. Policy Rules
 
 The UI should be clean, readable, and useful for a non-technical finance manager.
 
@@ -711,7 +710,7 @@ This section is a historical build map, not a pending roadmap. The current imple
 - Near-threshold detection
 - Novelty detection
 - Peer deviation
-- Risk Radar page
+- Backend risk scoring for review, approvals, and reports
 
 ### Phase 5: Policy RAG
 
@@ -793,11 +792,10 @@ Use this as the primary hackathon demo:
 8. App answers using follow-up context.
 9. User runs compliance scan.
 10. App flags missing receipts, missing pre-approvals, restricted alcohol, fines/tickets, and context-needed meals/entertainment.
-11. User opens Risk Radar and reviews a split-transaction example.
-12. User creates an approval request.
-13. AI recommends approve or deny using policy, risk, budget, readiness, citations, and history.
-14. User generates Sarah Chen’s Marketing expense report.
-15. Report shows line items, policy flags, risk flags, workflow metrics, citations, visuals, approval/readiness context, summary, and CSV export.
+11. User creates an approval request.
+12. AI recommends approve or deny using policy, risk, budget, readiness, citations, and history.
+13. User generates Sarah Chen’s Marketing expense report.
+14. Report shows line items, policy flags, risk flags, workflow metrics, citations, visuals, approval/readiness context, summary, and CSV export.
 
 ---
 

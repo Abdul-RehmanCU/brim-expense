@@ -99,4 +99,37 @@ describe('buildInsightPreviewChartSpec', () => {
     expect(spec?.kind).toBe('line')
     expect(spec && 'series' in spec ? spec.series[0].key : null).toBe('sum_amount_cad')
   })
+
+  it('prefers a chart preview over metric cards when a single-row result is chart-intended', () => {
+    const result: InsightQueryResponse = {
+      question: 'Generate me some charts',
+      session_id: 'session-1',
+      plan: {
+        intent: 'department_spend_trend',
+        mode: 'chart',
+        tool: 'spend.groupBy',
+        filters: { department: 'Marketing' },
+        group_by: ['month'],
+        metrics: ['sum_amount_cad', 'transaction_count'],
+        sort: [],
+        limit: 24,
+        visualization: 'bar',
+        comparison_options: {},
+        report_options: {},
+      },
+      validation: { valid: true, errors: [], warnings: [] },
+      planner_source: 'deterministic_followup',
+      summary: '',
+      columns: ['label', 'sum_amount_cad'],
+      rows: [{ label: '2026-01', values: { sum_amount_cad: 102773.43 } }],
+      citations: [],
+      visualization: 'bar',
+      metadata: {},
+    }
+
+    const spec = buildInsightPreviewChartSpec(result)
+
+    expect(spec?.kind).toBe('bar')
+    expect(spec && 'data' in spec ? spec.data : []).toEqual([{ label: '2026-01', sum_amount_cad: 102773.43 }])
+  })
 })

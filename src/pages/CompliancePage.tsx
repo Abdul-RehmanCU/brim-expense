@@ -1,4 +1,4 @@
-import { RefreshCw, ShieldCheck, Sparkles, TrendingUp } from 'lucide-react'
+import { ShieldCheck, Sparkles, TrendingUp } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 
 import { PageScaffold } from '@/components/layout/PageScaffold'
@@ -259,27 +259,6 @@ export function CompliancePage() {
     }
   }, [activeScanStage.target, isScanning])
 
-  async function loadPolicyData() {
-    setIsLoading(true)
-    setError(null)
-
-    try {
-      const [loadedSummary, loadedQueueItems, loadedRepeatOffenders] = await Promise.all([
-        getPolicySummary(),
-        listReviewQueueItems(queueFilters),
-        getPolicyRepeatOffenders(),
-      ])
-      setSummary(loadedSummary)
-      setQueueItems(sortQueueItems(loadedQueueItems))
-      setHasMoreQueueItems(loadedQueueItems.length === reviewQueuePageSize)
-      setRepeatOffenders(loadedRepeatOffenders)
-    } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : 'Could not load policy results.')
-    } finally {
-      setIsLoading(false)
-    }
-  }
-
   async function loadMoreQueueItems() {
     setIsLoadingMore(true)
     setError(null)
@@ -336,19 +315,16 @@ export function CompliancePage() {
 
     async function loadInitialPolicyData() {
       try {
-        const [loadedSummary, loadedQueueItems] = await Promise.all([
+        const [loadedSummary, loadedQueueItems, loadedRepeatOffenders] = await Promise.all([
           getPolicySummary(),
           listReviewQueueItems(queueFilters),
+          getPolicyRepeatOffenders(),
         ])
 
         if (!ignore) {
           setSummary(loadedSummary)
           setQueueItems(sortQueueItems(loadedQueueItems))
           setHasMoreQueueItems(loadedQueueItems.length === reviewQueuePageSize)
-        }
-
-        const loadedRepeatOffenders = await getPolicyRepeatOffenders()
-        if (!ignore) {
           setRepeatOffenders(loadedRepeatOffenders)
         }
       } catch (loadError) {
@@ -386,22 +362,16 @@ export function CompliancePage() {
               <p className="mt-1 text-sm text-muted-foreground">{t('compliance.checkIssuesBody')}</p>
             </div>
           </div>
-          <div className="flex flex-wrap gap-2">
-            <Button type="button" variant="outline" onClick={loadPolicyData} disabled={isLoading || isScanning}>
-              <RefreshCw className="size-4" aria-hidden="true" />
-              {t('actions.refresh')}
-            </Button>
-            <Button type="button" onClick={runPolicyScan} disabled={isScanning}>
-              {isScanning ? t('actions.scanning') : t('compliance.checkTransactions')}
-            </Button>
-          </div>
+          <Button type="button" onClick={runPolicyScan} disabled={isScanning}>
+            {isScanning ? t('actions.scanning') : t('compliance.checkTransactions')}
+          </Button>
         </div>
 
         {isScanning ? <ComplianceScanProgress activeStage={activeScanStage} progress={scanProgress} stages={scanStages} /> : null}
 
         {error ? <p className="mt-3 rounded-lg border border-red-300/70 bg-red-100/70 p-3 text-sm text-red-700 dark:border-red-400/30 dark:bg-red-400/10 dark:text-red-100">{error}</p> : null}
 
-        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8">
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           <SummaryMetric label={t('compliance.scanned')} value={summary.total_scanned} locale={locale} />
           <SummaryMetric label={t('compliance.compliant')} value={summary.compliant} locale={locale} />
           <SummaryMetric label={t('compliance.approvalEvidenceNeeded')} value={summary.approval_evidence_needed} locale={locale} />
@@ -426,11 +396,12 @@ export function CompliancePage() {
         </p>
       </section>
 
-      <TopFindingsPanel currencyFormatter={currencyFormatter} groups={reviewGroups} items={queueItems} locale={locale} summary={summary} />
-
-      <section className="grid gap-3 lg:grid-cols-2">
-        <RepeatOffenderPanel title={t('compliance.employeesWithOpenFlags')} items={repeatOffenders.employees} locale={locale} />
-        <RepeatOffenderPanel title={t('compliance.departmentsWithOpenFlags')} items={repeatOffenders.departments} locale={locale} />
+      <section className="grid gap-3 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.75fr)]">
+        <TopFindingsPanel currencyFormatter={currencyFormatter} groups={reviewGroups} items={queueItems} locale={locale} summary={summary} />
+        <div className="grid gap-3">
+          <RepeatOffenderPanel title={t('compliance.employeesWithOpenFlags')} items={repeatOffenders.employees} locale={locale} />
+          <RepeatOffenderPanel title={t('compliance.departmentsWithOpenFlags')} items={repeatOffenders.departments} locale={locale} />
+        </div>
       </section>
 
       <section className="surface-panel overflow-hidden">
@@ -608,10 +579,11 @@ function TopFindingsPanel({
 }) {
   const { t } = useUiPreferences()
   const topGroups = groups.slice(0, 3)
-  const highCritical = items.filter((item) => item.review_level === 'high' || item.review_level === 'critical').length
-  const policyAndRisk = items.filter((item) => policyFlagsFor(item).length > 0 && riskSignalsFor(item).length > 0).length
-  const totalPolicyFlags = items.reduce((total, item) => total + policyFlagsFor(item).length, 0)
-  const totalRiskSignals = items.reduce((total, item) => total + riskSignalsFor(item).length, 0)
+  const visibleHighCritical = items.filter((item) => item.review_level === 'high' || item.review_level === 'critical').length
+  const visibleSignals = items.reduce((total, item) => total + policyFlagsFor(item).length + riskSignalsFor(item).length, 0)
+  const reviewRequiredCount = summary.total_scanned > 0 ? summary.review_required : items.length
+  const highCriticalCount = summary.total_scanned > 0 ? summary.high_or_critical : visibleHighCritical
+  const totalSignals = summary.total_scanned > 0 ? (summary.individual_flags || summary.violations_created) : visibleSignals
   const topGroup = topGroups[0]
 
   return (
@@ -627,26 +599,21 @@ function TopFindingsPanel({
               <p className="mt-1 max-w-3xl text-sm text-muted-foreground">{t('compliance.attentionBody')}</p>
             </div>
           </div>
-          <div className="rounded-xl border border-border/70 bg-muted/35 p-3 text-sm text-muted-foreground">
+          <div className="rounded-xl border border-border/70 bg-muted/35 p-3 text-sm text-muted-foreground xl:max-w-sm">
             <div className="flex items-center gap-2 font-semibold text-foreground">
               <Sparkles className="size-4" aria-hidden="true" />
               {t('compliance.quickSummary')}
             </div>
-            <p className="mt-1 max-w-xl leading-5">
+            <p className="mt-1 leading-5">
               {topGroup ? describeReviewGroupSummary(topGroup, currencyFormatter) : composeReviewerContext(summary, items)}
-            </p>
-            <p className="mt-2 text-xs leading-5 text-muted-foreground">
-              {topGroup?.representative.reviewer_brief?.advisory_notice ??
-                'Advisory only; deterministic policy and risk results remain the source of truth.'}
             </p>
           </div>
         </div>
 
-        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <SummaryMetric label={t('compliance.reviewRequired')} value={items.length} locale={locale} />
-          <SummaryMetric label={t('compliance.highCritical')} value={highCritical} locale={locale} />
-          <SummaryMetric label={t('compliance.policyViolations')} value={totalPolicyFlags} locale={locale} />
-          <SummaryMetric label="Risk signals" value={totalRiskSignals} locale={locale} />
+        <div className="mt-4 grid gap-3 sm:grid-cols-3">
+          <SummaryMetric label={t('compliance.reviewRequired')} value={reviewRequiredCount} locale={locale} />
+          <SummaryMetric label={t('compliance.highCritical')} value={highCriticalCount} locale={locale} />
+          <SummaryMetric label="Signals" value={totalSignals} locale={locale} />
         </div>
       </div>
 
@@ -657,10 +624,10 @@ function TopFindingsPanel({
           {topGroups.map((group) => (
             <article key={group.key} className="rounded-xl border border-border/70 bg-background/70 p-3">
               <div className="flex items-start justify-between gap-3">
-                <div>
-                  <p className="font-medium text-foreground">{group.merchant ?? 'Unknown merchant'}</p>
+                <div className="min-w-0">
+                  <p className="truncate font-medium text-foreground">{group.merchant ?? 'Unknown merchant'}</p>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    {group.employee ?? 'Synthetic Employee'} · {group.department ?? 'Synthetic Department'} · {group.transactionDate ?? '-'}
+                    {group.employee ?? 'Synthetic Employee'} · {group.department ?? 'Synthetic Department'}
                   </p>
                 </div>
                 <span className={`status-chip ${riskSeverityClass[group.highestReviewLevel]}`}>
@@ -675,32 +642,13 @@ function TopFindingsPanel({
                 ) : null}
                 <StatusPill value={group.highestPolicyStatus ?? 'compliant'} />
                 <span className={`status-chip ${riskSeverityClass[group.highestRiskLevel]}`}>{formatSignalLabel(group.highestRiskLevel)} risk</span>
-                <span className="status-chip bg-muted text-muted-foreground">Priority {group.priority}</span>
                 <span className="ml-auto text-sm font-semibold tabular-nums text-foreground">{currencyFormatter.format(group.totalAmount)}</span>
               </div>
               <p className="mt-3 text-sm leading-6 text-muted-foreground">{describeReviewGroup(group)}</p>
-              <div className="mt-3 flex flex-wrap gap-1.5">
-                {getGroupFlagSummaries(group)
-                  .slice(0, 3)
-                  .map((flag) => (
-                    <span key={flag.key} className={`status-chip ${flag.className}`}>
-                      {flag.label}
-                    </span>
-                  ))}
-              </div>
-              <p className="mt-3 border-t border-border/70 pt-3 text-xs leading-5 text-muted-foreground">
-                <span className="font-medium text-foreground">{t('compliance.next')}</span>{' '}
-                {group.items.length > 1 ? 'Open the grouped review card below to inspect row-level evidence once.' : group.representative.next_action}
-              </p>
             </article>
           ))}
         </div>
       )}
-      {policyAndRisk > 0 ? (
-        <p className="border-t border-border/70 p-4 text-xs text-muted-foreground">
-          {policyAndRisk.toLocaleString(locale)} visible items contain both policy flags and risk detection signals.
-        </p>
-      ) : null}
     </section>
   )
 }

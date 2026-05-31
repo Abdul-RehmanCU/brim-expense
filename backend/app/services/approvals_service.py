@@ -14,6 +14,8 @@ except ModuleNotFoundError:
 
 from app.database.supabase_client import get_supabase_client
 from app.schemas.approvals import (
+    ApprovalExplanation,
+    ApprovalExplanationReason,
     ApprovalContextSnapshot,
     ApprovalDecisionRequest,
     ApprovalListResponse,
@@ -25,9 +27,10 @@ from app.schemas.approvals import (
     EmployeeSpendHistory,
 )
 from app.schemas.common import PlaceholderResponse
-from app.schemas.review_queue import ReviewerBrief
+from app.schemas.review_queue import CitedPolicyClause, ReviewerBrief
 from app.schemas.risk import RiskSignal
 from app.services.policy_engine import utc_now_iso
+from app.services.review_grouping import annotate_review_clusters, review_group_key_from_transaction, review_group_key_from_values
 
 POLICY_CLEAR_STATUSES = {"compliant", "excluded_non_expense", None}
 RISK_FLAG_LEVELS = {"medium", "high", "critical"}
@@ -77,6 +80,13 @@ def get_approval(approval_id: str) -> ApprovalRequestDetail:
     return detail
 
 
+def get_approval_explanation(approval_id: str) -> ApprovalExplanation:
+    detail = get_approval(approval_id)
+    if detail.approval_explanation:
+        return detail.approval_explanation
+    raise HTTPException(status_code=404, detail="Approval explanation was not found.")
+
+
 def create_approval_request(request: ApprovalRequestCreate) -> ApprovalRequestDetail:
     if not request.review_queue_item_id and not request.transaction_id:
         raise HTTPException(status_code=422, detail="review_queue_item_id or transaction_id is required.")
@@ -86,49 +96,67 @@ def create_approval_request(request: ApprovalRequestCreate) -> ApprovalRequestDe
     if not transaction_id:
         raise HTTPException(status_code=422, detail="Review queue item does not include a transaction id.")
 
-    existing = fetch_existing_open_approval(transaction_id)
-    if existing:
-        return get_approval(str(existing["id"]))
+    cluster_review_items = fetch_review_cluster_review_items(review_item)
+    created_or_existing: list[dict[str, Any]] = []
 
-    snapshot = build_approval_context_snapshot(review_item)
-    recommendation = compose_approval_recommendation(snapshot, client=default_approval_recommendation_client())
-    transaction = snapshot.transaction
-    employee_id = str(transaction.get("employee_id") or review_item.get("employee_id") or "")
-    department_id = str(transaction.get("department_id") or review_item.get("department_id") or "")
-    if not employee_id or not department_id:
-        raise HTTPException(status_code=422, detail="Approval request requires employee and department context.")
+    for cluster_review_item in cluster_review_items:
+        cluster_transaction_id = str(cluster_review_item.get("transaction_id") or "")
+        if not cluster_transaction_id:
+            continue
+        existing = fetch_existing_open_approval(cluster_transaction_id)
+        if existing:
+            created_or_existing.append(existing)
+            update_review_queue_status(cluster_transaction_id, "in_approval")
+            continue
 
-    payload = {
-        "transaction_id": transaction_id,
-        "employee_id": employee_id,
-        "department_id": department_id,
-        "status": "requested",
-        "requested_amount_cad": float(transaction.get("amount_cad") or review_item.get("amount_cad") or 0),
-        "policy_check_id": review_item.get("policy_check_id") or snapshot.policy.get("id"),
-        "risk_score_id": review_item.get("risk_score_id") or snapshot.risk.get("id"),
-        "ai_recommendation": recommendation.model_dump(mode="json"),
-        "requester_note": request.requester_note,
-        "review_queue_item_id": review_item.get("id"),
-        "context_snapshot": snapshot.model_dump(mode="json"),
-        "recommendation_source": recommendation.source,
-        "recommendation_generated_at": utc_now_iso(),
-    }
-    inserted = get_supabase_client().table("approval_requests").insert(payload).execute().data or []
-    if not inserted:
-        raise HTTPException(status_code=500, detail="Approval request could not be created.")
-    approval = inserted[0]
-    update_review_queue_status(transaction_id, "in_approval")
-    insert_audit_event(
-        action="approval.requested",
-        entity_id=str(approval["id"]),
-        actor=request.actor,
-        details={
-            "transaction_id": transaction_id,
-            "review_queue_item_id": review_item.get("id"),
-            "recommendation": recommendation.model_dump(mode="json"),
-        },
+        snapshot = build_approval_context_snapshot(cluster_review_item)
+        recommendation = compose_approval_recommendation(snapshot, client=default_approval_recommendation_client())
+        transaction = snapshot.transaction
+        employee_id = str(transaction.get("employee_id") or cluster_review_item.get("employee_id") or "")
+        department_id = str(transaction.get("department_id") or cluster_review_item.get("department_id") or "")
+        if not employee_id or not department_id:
+            raise HTTPException(status_code=422, detail="Approval request requires employee and department context.")
+
+        payload = {
+            "transaction_id": cluster_transaction_id,
+            "employee_id": employee_id,
+            "department_id": department_id,
+            "status": "requested",
+            "requested_amount_cad": float(transaction.get("amount_cad") or cluster_review_item.get("amount_cad") or 0),
+            "policy_check_id": cluster_review_item.get("policy_check_id") or snapshot.policy.get("id"),
+            "risk_score_id": cluster_review_item.get("risk_score_id") or snapshot.risk.get("id"),
+            "ai_recommendation": recommendation.model_dump(mode="json"),
+            "requester_note": request.requester_note,
+            "review_queue_item_id": cluster_review_item.get("id"),
+            "context_snapshot": snapshot.model_dump(mode="json"),
+            "recommendation_source": recommendation.source,
+            "recommendation_generated_at": utc_now_iso(),
+        }
+        inserted = get_supabase_client().table("approval_requests").insert(payload).execute().data or []
+        if not inserted:
+            raise HTTPException(status_code=500, detail="Approval request could not be created.")
+        approval = inserted[0]
+        created_or_existing.append(approval)
+        update_review_queue_status(cluster_transaction_id, "in_approval")
+        insert_audit_event(
+            action="approval.requested",
+            entity_id=str(approval["id"]),
+            actor=request.actor,
+            details={
+                "transaction_id": cluster_transaction_id,
+                "review_queue_item_id": cluster_review_item.get("id"),
+                "review_group_transaction_ids": [str(item.get("transaction_id")) for item in cluster_review_items if item.get("transaction_id")],
+                "recommendation": recommendation.model_dump(mode="json"),
+            },
+        )
+
+    selected = next(
+        (row for row in created_or_existing if str(row.get("transaction_id") or "") == transaction_id),
+        created_or_existing[0] if created_or_existing else None,
     )
-    return get_approval(str(approval["id"]))
+    if not selected:
+        raise HTTPException(status_code=500, detail="Approval request could not be created.")
+    return get_approval(str(selected["id"]))
 
 
 def decide_approval(approval_id: str, request: ApprovalDecisionRequest) -> ApprovalRequestDetail:
@@ -145,19 +173,39 @@ def decide_approval(approval_id: str, request: ApprovalDecisionRequest) -> Appro
         "decided_by": request.actor,
         "decided_at": decided_at,
     }
-    get_supabase_client().table("approval_requests").update(update_payload).eq("id", approval_id).execute()
-    update_preapproval_from_decision(existing, request, decided_at)
-    update_review_queue_status(str(existing["transaction_id"]), "resolved")
-    insert_audit_event(
-        action=f"approval.{request.decision}",
-        entity_id=approval_id,
-        actor=request.actor,
-        details={
-            "transaction_id": existing.get("transaction_id"),
-            "decision": request.decision,
-            "note": request.note,
-        },
-    )
+    cluster_transactions = fetch_review_cluster_transactions_for_transaction_id(str(existing.get("transaction_id") or ""))
+    cluster_transaction_ids = [str(transaction["id"]) for transaction in cluster_transactions if transaction.get("id")]
+    cluster_approvals = fetch_rows_by_values("approval_requests", "transaction_id", cluster_transaction_ids, "*")
+    approvals_by_transaction_id = {
+        str(row.get("transaction_id") or ""): row
+        for row in cluster_approvals
+        if row.get("transaction_id")
+    }
+
+    for approval in cluster_approvals:
+        if approval.get("status") in {"approved", "denied", "cancelled"} and str(approval.get("id")) != approval_id:
+            continue
+        get_supabase_client().table("approval_requests").update(update_payload).eq("id", approval["id"]).execute()
+        insert_audit_event(
+            action=f"approval.{request.decision}",
+            entity_id=str(approval["id"]),
+            actor=request.actor,
+            details={
+                "transaction_id": approval.get("transaction_id"),
+                "decision": request.decision,
+                "note": request.note,
+                "review_group_transaction_ids": cluster_transaction_ids,
+            },
+        )
+
+    for transaction in cluster_transactions:
+        transaction_id = str(transaction.get("id") or "")
+        update_preapproval_from_decision(
+            approvals_by_transaction_id.get(transaction_id) or approval_row_from_transaction(existing, transaction),
+            request,
+            decided_at,
+        )
+        update_review_queue_status(transaction_id, "resolved")
     return get_approval(approval_id)
 
 
@@ -173,6 +221,66 @@ def fetch_review_queue_item(request: ApprovalRequestCreate) -> dict[str, Any]:
     if request.transaction_id:
         return {"transaction_id": request.transaction_id}
     raise HTTPException(status_code=404, detail="Review queue item was not found.")
+
+
+def fetch_review_cluster_review_items(seed_review_item: dict[str, Any]) -> list[dict[str, Any]]:
+    transaction_id = str(seed_review_item.get("transaction_id") or "")
+    cluster_transactions = fetch_review_cluster_transactions_for_transaction_id(transaction_id)
+    cluster_transaction_ids = [str(transaction["id"]) for transaction in cluster_transactions if transaction.get("id")]
+    if not cluster_transaction_ids:
+        return [seed_review_item]
+
+    rows = fetch_rows_by_values("review_queue_items", "transaction_id", cluster_transaction_ids, "*")
+    rows_by_transaction_id = {
+        str(row.get("transaction_id") or ""): row
+        for row in rows
+        if row.get("transaction_id")
+        and (
+            str(row.get("queue_status") or "") in {"open", "in_approval"}
+            or int(row.get("review_priority") or 0) > 0
+        )
+    }
+    rows_by_transaction_id.setdefault(transaction_id, seed_review_item)
+    return [
+        rows_by_transaction_id[cluster_transaction_id]
+        for cluster_transaction_id in cluster_transaction_ids
+        if cluster_transaction_id in rows_by_transaction_id
+    ]
+
+
+def fetch_review_cluster_transactions_for_transaction_id(transaction_id: str) -> list[dict[str, Any]]:
+    transaction = fetch_one_by_id("transactions", transaction_id, "*")
+    if not transaction:
+        return []
+    return fetch_review_cluster_transactions(transaction)
+
+
+def fetch_review_cluster_transactions(seed_transaction: dict[str, Any]) -> list[dict[str, Any]]:
+    seed_key = review_group_key_from_transaction(seed_transaction)
+    if seed_key.startswith("transaction:"):
+        return [seed_transaction]
+
+    employee_id = str(seed_transaction.get("employee_id") or "")
+    if not employee_id:
+        return [seed_transaction]
+
+    candidates = fetch_rows_by_values("transactions", "employee_id", [employee_id], "*")
+    cluster = [
+        transaction
+        for transaction in candidates
+        if transaction.get("id") and review_group_key_from_transaction(transaction) == seed_key
+    ]
+    return cluster or [seed_transaction]
+
+
+def approval_row_from_transaction(existing: dict[str, Any], transaction: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "employee_id": transaction.get("employee_id") or existing.get("employee_id"),
+        "transaction_id": transaction.get("id") or existing.get("transaction_id"),
+        "department_id": transaction.get("department_id") or existing.get("department_id"),
+        "requested_amount_cad": transaction.get("amount_cad") or existing.get("requested_amount_cad") or 0,
+        "created_at": existing.get("created_at"),
+    }
 
 
 def build_approval_context_snapshot(review_item: dict[str, Any]) -> ApprovalContextSnapshot:
@@ -441,7 +549,7 @@ def approval_items_from_rows(rows: list[dict[str, Any]]) -> list[ApprovalRequest
         for row in fetch_rows_by_values("review_queue_items", "transaction_id", transaction_ids, "*")
         if row.get("transaction_id")
     }
-    return [
+    return annotate_review_clusters(
         approval_item_from_row(
             row,
             transaction=transactions.get(str(row.get("transaction_id") or "")),
@@ -450,7 +558,7 @@ def approval_items_from_rows(rows: list[dict[str, Any]]) -> list[ApprovalRequest
             review_item=queue_items.get(str(row.get("transaction_id") or "")),
         )
         for row in rows
-    ]
+    )
 
 
 def approval_detail_from_row(row: dict[str, Any]) -> ApprovalRequestDetail:
@@ -460,9 +568,15 @@ def approval_detail_from_row(row: dict[str, Any]) -> ApprovalRequestDetail:
     review_item = latest_review_queue_item(str(row.get("transaction_id") or ""))
     item = approval_item_from_row(row, transaction=transaction, employee=employee, department=department, review_item=review_item)
     context_snapshot = row.get("context_snapshot") if isinstance(row.get("context_snapshot"), dict) else None
+    parsed_snapshot = ApprovalContextSnapshot(**context_snapshot) if context_snapshot else None
     return ApprovalRequestDetail(
         **item.model_dump(),
-        context_snapshot=ApprovalContextSnapshot(**context_snapshot) if context_snapshot else None,
+        context_snapshot=parsed_snapshot,
+        approval_explanation=build_approval_explanation(
+            item=item,
+            snapshot=parsed_snapshot,
+            reviewer_brief=item.reviewer_brief,
+        ),
     )
 
 
@@ -508,6 +622,24 @@ def approval_item_from_row(
         risk_signals=[RiskSignal(**signal) for signal in (review_item or {}).get("risk_signals") or []],
         ai_recommendation=ai_recommendation,
         reviewer_brief=ReviewerBrief(**reviewer_brief) if isinstance(reviewer_brief, dict) else None,
+        review_group_key=(
+            review_item.get("review_group_key")
+            or (
+                review_group_key_from_transaction(transaction)
+                if transaction
+                else review_group_key_from_values(
+                transaction_id=str(row.get("transaction_id") or ""),
+                employee_id=str(row.get("employee_id")) if row.get("employee_id") else None,
+                department_id=str(row.get("department_id")) if row.get("department_id") else None,
+                merchant=None,
+                transaction_date=None,
+                category=None,
+            )
+            )
+        ),
+        review_group_size=1,
+        review_group_total_amount_cad=float(row.get("requested_amount_cad") or (transaction or {}).get("amount_cad") or 0),
+        review_group_transaction_ids=[str(row["transaction_id"])],
         budget_status=DepartmentBudgetStatus(**budget) if budget else None,
         spend_history=EmployeeSpendHistory(**spend_history) if spend_history else None,
         requester_note=row.get("requester_note"),
@@ -534,6 +666,199 @@ def approval_recommendation_from_row(value: Any) -> ApprovalRecommendation | Non
         return ApprovalRecommendation(**payload)
     except ValidationError:
         return None
+
+
+def build_approval_explanation(
+    *,
+    item: ApprovalRequestItem,
+    snapshot: ApprovalContextSnapshot | None,
+    reviewer_brief: ReviewerBrief | None,
+) -> ApprovalExplanation | None:
+    recommendation = item.ai_recommendation
+    if not recommendation and snapshot:
+        recommendation = compose_approval_recommendation(snapshot, client=None)
+    if not recommendation:
+        return None
+
+    policy = snapshot.policy if snapshot else {}
+    risk = snapshot.risk if snapshot else {}
+    budget = snapshot.budget if snapshot else item.budget_status or DepartmentBudgetStatus()
+    spend_history = snapshot.spend_history if snapshot else item.spend_history or EmployeeSpendHistory()
+    policy_flags = list(policy.get("flags") or item.policy_flags or [])
+    risk_signals = list(risk.get("signals") or [signal.model_dump(mode="json") for signal in item.risk_signals])
+    missing_information = normalized_strings(
+        [*recommendation.missing_information, *list(policy.get("missing_information") or [])]
+    )
+    cited_policy_clauses = list(reviewer_brief.cited_policy_clauses if reviewer_brief else [])
+    blocking_reasons = approval_blocking_reasons(
+        item=item,
+        policy_flags=policy_flags,
+        risk_signals=risk_signals,
+        missing_information=missing_information,
+        budget=budget,
+    )
+    supporting_evidence = approval_supporting_evidence(
+        item=item,
+        recommendation=recommendation,
+        budget=budget,
+        spend_history=spend_history,
+    )
+    would_change_outcome_if = approval_outcome_change_conditions(
+        recommendation=recommendation,
+        missing_information=missing_information,
+        policy_flags=policy_flags,
+        risk_signals=risk_signals,
+        budget=budget,
+        cited_policy_clauses=cited_policy_clauses,
+    )
+
+    return ApprovalExplanation(
+        decision=recommendation.recommendation,
+        confidence=recommendation.confidence,
+        summary=approval_explanation_summary(
+            recommendation=recommendation,
+            blocking_reasons=blocking_reasons,
+            missing_information=missing_information,
+            cited_policy_clauses=cited_policy_clauses,
+        ),
+        blocking_reasons=blocking_reasons,
+        supporting_evidence=supporting_evidence,
+        missing_information=missing_information,
+        cited_policy_clauses=cited_policy_clauses,
+        would_change_outcome_if=would_change_outcome_if,
+    )
+
+
+def approval_blocking_reasons(
+    *,
+    item: ApprovalRequestItem,
+    policy_flags: list[dict[str, Any]],
+    risk_signals: list[dict[str, Any]],
+    missing_information: list[str],
+    budget: DepartmentBudgetStatus,
+) -> list[ApprovalExplanationReason]:
+    reasons: list[ApprovalExplanationReason] = []
+    seen: set[str] = set()
+
+    if missing_information:
+        detail = "The packet is missing evidence or business context required before approval."
+        reasons.append(ApprovalExplanationReason(label="Missing required context", severity="blocking", detail=detail))
+        seen.add(detail)
+
+    for flag in policy_flags[:3]:
+        rule_code = str(flag.get("rule_code") or "Policy finding")
+        explanation = str(flag.get("explanation") or "A deterministic policy rule matched this transaction.")
+        required_action = str(flag.get("required_action") or "").strip()
+        detail = explanation if not required_action else f"{explanation} Next step: {required_action}"
+        if detail in seen:
+            continue
+        reasons.append(
+            ApprovalExplanationReason(
+                label=format_reason_label(rule_code),
+                severity="blocking" if str(item.policy_status or "").lower() in {"policy_violation", "approval_evidence_needed", "context_needed", "review_required"} else "warning",
+                detail=detail,
+            )
+        )
+        seen.add(detail)
+
+    for signal in risk_signals[:3]:
+        message = str(signal.get("message") or "Risk scoring attached a material anomaly signal.")
+        if message in seen:
+            continue
+        severity = str(signal.get("severity") or "medium").lower()
+        reasons.append(
+            ApprovalExplanationReason(
+                label=f"{format_reason_label(str(signal.get('type') or 'risk signal'))} risk",
+                severity="blocking" if severity in {"high", "critical"} else "warning",
+                detail=message,
+            )
+        )
+        seen.add(message)
+
+    if budget.quarterly_remaining_cad < 0:
+        detail = (
+            f"Department quarterly remaining budget is CAD {budget.quarterly_remaining_cad:,.2f}, so the request lands beyond the synthetic budget envelope."
+        )
+        if detail not in seen:
+            reasons.append(ApprovalExplanationReason(label="Budget overrun", severity="blocking", detail=detail))
+
+    return reasons
+
+
+def approval_supporting_evidence(
+    *,
+    item: ApprovalRequestItem,
+    recommendation: ApprovalRecommendation,
+    budget: DepartmentBudgetStatus,
+    spend_history: EmployeeSpendHistory,
+) -> list[str]:
+    evidence = [
+        f"AI recommendation: {format_reason_label(recommendation.recommendation)} with {recommendation.confidence} confidence.",
+        f"Transaction amount: CAD {item.requested_amount_cad:,.2f} at {item.merchant or 'Unknown merchant'}.",
+        f"Policy status: {format_reason_label(item.policy_status or 'compliant')}.",
+        f"Risk level: {format_reason_label(item.risk_level or 'low')} with score {item.risk_score}.",
+        f"Department quarterly remaining: CAD {budget.quarterly_remaining_cad:,.2f}.",
+        f"Employee history: {spend_history.transaction_count} transactions totaling CAD {spend_history.total_spend_cad:,.2f}; prior approvals {spend_history.prior_approved_count}/{spend_history.prior_approval_count}.",
+    ]
+    return normalized_strings([*recommendation.grounded_inputs, *evidence])
+
+
+def approval_outcome_change_conditions(
+    *,
+    recommendation: ApprovalRecommendation,
+    missing_information: list[str],
+    policy_flags: list[dict[str, Any]],
+    risk_signals: list[dict[str, Any]],
+    budget: DepartmentBudgetStatus,
+    cited_policy_clauses: list[CitedPolicyClause],
+) -> list[str]:
+    if recommendation.recommendation == "approve":
+        return ["No blocking policy, risk, or budget condition is currently attached to this packet."]
+
+    next_steps: list[str] = []
+    for item in missing_information:
+        next_steps.append(f"Attach or confirm {item}.")
+    for flag in policy_flags:
+        required_action = str(flag.get("required_action") or "").strip()
+        if required_action:
+            next_steps.append(required_action)
+    if any(str(signal.get("severity") or "").lower() in {"high", "critical"} for signal in risk_signals):
+        next_steps.append("Add supporting evidence that resolves the anomaly signals or confirms the business purpose.")
+    if budget.quarterly_remaining_cad < 0:
+        next_steps.append("Document a budget exception or move the spend into an approved funding path.")
+    if cited_policy_clauses:
+        next_steps.append("Show why the packet satisfies the cited policy clauses, or clarify why the rule should not apply.")
+    if not next_steps:
+        next_steps.append("Provide stronger business justification or correct the underlying transaction classification.")
+    return normalized_strings(next_steps)
+
+
+def approval_explanation_summary(
+    *,
+    recommendation: ApprovalRecommendation,
+    blocking_reasons: list[ApprovalExplanationReason],
+    missing_information: list[str],
+    cited_policy_clauses: list[CitedPolicyClause],
+) -> str:
+    if recommendation.recommendation == "approve":
+        return (
+            "Approve is recommended because the packet has no blocking policy finding, no unresolved high-risk signal, "
+            "and the current budget context remains within range."
+        )
+
+    if blocking_reasons:
+        top_labels = ", ".join(reason.label for reason in blocking_reasons[:3])
+        clause_note = " Matching policy citations are attached." if cited_policy_clauses else ""
+        return f"Deny is recommended because the packet currently shows {top_labels}.{clause_note}"
+
+    if missing_information:
+        return "Deny is recommended until the packet includes the missing approval evidence or business context."
+
+    return recommendation.rationale
+
+
+def format_reason_label(value: str) -> str:
+    return value.replace("_", " ").strip().title()
 
 
 def update_preapproval_from_decision(existing: dict[str, Any], request: ApprovalDecisionRequest, decided_at: str) -> None:

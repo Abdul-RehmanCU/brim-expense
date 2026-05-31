@@ -9,7 +9,7 @@ import {
   Send,
   ShieldCheck,
 } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
 import { PolyAvatar } from '@/components/assistant/PolyAvatar'
 import { PageScaffold } from '@/components/layout/PageScaffold'
@@ -64,9 +64,7 @@ export function TalkToDataPage() {
     () => ({
       routeId: 'talkToData' as const,
       title: 'Talk to Data',
-      summary: selectedResult
-        ? `Current answer uses ${selectedResult.plan.tool} and returned ${selectedResult.rows.length} row${selectedResult.rows.length === 1 ? '' : 's'}.`
-        : 'Ask finance questions over spend, policy, and risk data. The shared assistant carries context between pages.',
+      summary: 'You are in Poly\'s Ask workspace for finance questions, chart previews, result rows, and exports.',
       focus: selectedResult
         ? {
             type: 'insight_result',
@@ -110,6 +108,11 @@ export function TalkToDataPage() {
             citation_count: selectedResult.citations.length,
           }
         : {},
+      details: {
+        quick_summary: selectedResult
+          ? `The current selected answer is a ${selectedResult.visualization ?? 'table'} using ${selectedResult.plan.tool} with ${selectedResult.rows.length} row${selectedResult.rows.length === 1 ? '' : 's'}.`
+          : 'Ask from the conversation panel and inspect the latest result, chart preview, and exports on the right.',
+      },
       availableViews: ['conversation', 'result preview', 'artifacts'],
       suggestions: [],
     }),
@@ -117,6 +120,12 @@ export function TalkToDataPage() {
   )
 
   useAssistantPageContext(assistantContext)
+
+  useEffect(() => {
+    if (selectedAssistantTurnId) {
+      setResultWorkspaceTab('result')
+    }
+  }, [selectedAssistantTurnId])
 
   return (
     <PageScaffold
@@ -234,7 +243,11 @@ export function TalkToDataPage() {
                 <div className="min-w-0 flex-1">
                   <p className="text-base font-semibold text-foreground">Results</p>
                   <p className="mt-1 text-sm leading-6 text-muted-foreground">
-                    {selectedResult ? selectedResult.summary : 'Pick an assistant response to inspect the rows, chart preview, citations, and exports.'}
+                    {selectedResult
+                      ? selectedResult.summary
+                      : isAsking
+                        ? 'Poly is building a fresh result preview for your latest question.'
+                        : 'Pick an assistant response to inspect the rows, chart preview, citations, and exports.'}
                   </p>
                 </div>
               </div>
@@ -277,7 +290,7 @@ export function TalkToDataPage() {
                 />
               )
             ) : resultWorkspaceTab === 'result' ? (
-              <EmptyResultState />
+              isAsking ? <LoadingResultState /> : <EmptyResultState />
             ) : (
               <EmptyArtifactState />
             )}
@@ -285,6 +298,19 @@ export function TalkToDataPage() {
         </section>
       </section>
     </PageScaffold>
+  )
+}
+
+function LoadingResultState() {
+  return (
+    <div className="flex h-full min-h-[24rem] items-center justify-center px-6 py-10">
+      <div className="max-w-md rounded-3xl border border-dashed border-border/70 bg-background/55 p-6 text-center">
+        <p className="text-base font-semibold text-foreground">Refreshing result preview</p>
+        <p className="mt-2 text-sm leading-6 text-muted-foreground">
+          Poly is clearing the previous preview and rebuilding the latest chart, rows, and exports for this question.
+        </p>
+      </div>
+    </div>
   )
 }
 

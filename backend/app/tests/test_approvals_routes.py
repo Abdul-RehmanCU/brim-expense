@@ -17,6 +17,7 @@ if "postgrest.exceptions" not in sys.modules:
     sys.modules["postgrest.exceptions"] = exceptions_module
 
 from app.schemas.approvals import (
+    ApprovalExplanation,
     ApprovalListResponse,
     ApprovalRecommendation,
     ApprovalRequestDetail,
@@ -80,6 +81,30 @@ def test_approvals_list_endpoint(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["approvals"][0]["employee_name"] == "Sarah Chen"
+
+
+def test_approvals_explanation_endpoint(monkeypatch):
+    def fake_explanation(approval_id):
+        assert approval_id == "approval_1"
+        return ApprovalExplanation(
+            decision="deny",
+            confidence="medium",
+            summary="Deny is recommended because required context is missing.",
+            blocking_reasons=[],
+            supporting_evidence=["Policy status: approval_evidence_needed."],
+            missing_information=["manager pre-authorization evidence"],
+            cited_policy_clauses=[],
+            would_change_outcome_if=["Attach or confirm manager pre-authorization evidence."],
+        )
+
+    monkeypatch.setattr("app.routers.approvals.get_approval_explanation", fake_explanation)
+
+    response = TestClient(app).get("/approvals/approval_1/explanation")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["decision"] == "deny"
+    assert payload["missing_information"] == ["manager pre-authorization evidence"]
 
 
 def approval_item(**overrides):

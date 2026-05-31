@@ -840,7 +840,7 @@ def transaction_context_fields(transaction: dict[str, Any], category: str) -> di
     transaction_eligibility = str(transaction.get("transaction_eligibility") or "") or None
     transaction_type = str(transaction.get("transaction_type") or "") or None
     business_category = finance_category(transaction)
-    policy_category = str(transaction.get("policy_category") or "") or None
+    policy_category = str(transaction.get("policy_category") or category or "").strip() or None
     normalized_category = str(transaction.get("normalized_category") or "") or None
 
     return {

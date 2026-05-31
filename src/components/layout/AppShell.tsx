@@ -51,20 +51,6 @@ export function AppShell({ activeRouteId, children, onNavigate }: AppShellProps)
           </div>
         </div>
 
-        {!sidebarCollapsed ? (
-          <div className="mx-3 mt-3 rounded-xl border border-sidebar-border/80 bg-sidebar-accent/55 px-4 py-3 shadow-inner shadow-black/10">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-sidebar-foreground/50">{t('app.demoData')}</p>
-                <p className="mt-1 text-sm leading-5 text-sidebar-foreground/78">{t('app.demoDataBody')}</p>
-              </div>
-              <div className="rounded-full border border-sidebar-border/80 bg-sidebar/65 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-sidebar-foreground/60">
-                Safe
-              </div>
-            </div>
-          </div>
-        ) : null}
-
         <nav className="flex-1 space-y-1.5 p-3" aria-label="Primary navigation">
           {routes.map((route) => {
             const Icon = route.icon
@@ -77,17 +63,21 @@ export function AppShell({ activeRouteId, children, onNavigate }: AppShellProps)
                 type="button"
                 onClick={() => onNavigate(route.path)}
                 className={cn(
-                  'flex w-full items-center rounded-lg px-3 py-2.5 text-left text-sm font-medium transition-all duration-300',
+                  'nav-pill group flex w-full items-center rounded-lg px-3 py-2.5 text-left text-sm font-medium',
                   sidebarCollapsed ? 'justify-center' : 'gap-3',
-                  isActive
-                    ? 'bg-sidebar-primary text-sidebar-primary-foreground shadow-md shadow-black/15'
-                    : 'text-sidebar-foreground/72 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground hover:translate-x-1',
+                  isActive ? 'nav-pill-active bg-sidebar-primary text-sidebar-primary-foreground shadow-md shadow-black/15' : 'text-sidebar-foreground/72',
                 )}
                 aria-current={isActive ? 'page' : undefined}
                 aria-label={label}
                 title={sidebarCollapsed ? label : undefined}
               >
-                <Icon className="size-4" aria-hidden="true" />
+                <Icon
+                  className={cn(
+                    'size-4 transition-transform duration-200 ease-out',
+                    isActive ? 'scale-100' : 'group-hover:scale-105 group-hover:-translate-y-px',
+                  )}
+                  aria-hidden="true"
+                />
                 {!sidebarCollapsed ? <span>{label}</span> : null}
               </button>
             )
@@ -157,31 +147,23 @@ export function AppShell({ activeRouteId, children, onNavigate }: AppShellProps)
                   type="button"
                   onClick={() => onNavigate(route.path)}
                   className={cn(
-                    'inline-flex shrink-0 items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
-                    isActive ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:text-foreground',
+                    'nav-pill-mobile group inline-flex shrink-0 items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium',
+                    isActive ? 'nav-pill-mobile-active bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground',
                   )}
                   aria-current={isActive ? 'page' : undefined}
                 >
-                  <Icon className="size-4" aria-hidden="true" />
+                  <Icon
+                    className={cn(
+                      'size-4 transition-transform duration-200 ease-out',
+                      isActive ? 'scale-100' : 'group-hover:scale-105 group-hover:-translate-y-px',
+                    )}
+                    aria-hidden="true"
+                  />
                   {label}
                 </button>
               )
             })}
           </nav>
-
-          <div className="border-t border-border/60 px-4 py-3 lg:hidden">
-            <div className="rounded-xl border border-border/70 bg-card/70 px-4 py-3 backdrop-blur">
-              <div className="flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">{t('app.demoData')}</p>
-                  <p className="mt-1 text-sm leading-5 text-muted-foreground">{t('app.demoDataBody')}</p>
-                </div>
-                <div className="rounded-full border border-border/70 bg-background/75 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-foreground/70">
-                  Safe
-                </div>
-              </div>
-            </div>
-          </div>
         </header>
 
         <main className="desktop-scroll px-4 py-4 lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:overflow-x-hidden lg:px-6 lg:py-5">

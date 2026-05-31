@@ -1,5 +1,5 @@
-import { ArrowUpRight, BarChart3, ClipboardCheck, Download, FileSpreadsheet, LineChart as LineChartIcon, RefreshCw, Sparkles } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { ArrowUpRight, BarChart3, Building2, CalendarRange, ClipboardCheck, Download, FileSpreadsheet, LineChart as LineChartIcon, RefreshCw, Sparkles, UserRound } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Area,
   AreaChart,
@@ -20,35 +20,52 @@ import { PageScaffold } from '@/components/layout/PageScaffold'
 import { Button } from '@/components/ui/button'
 import {
   generateExpenseReport,
+  getReportScopeOptions,
   getExpenseReport,
-  getExpenseReportCsvUrl,
   listExpenseReports,
   type ExpenseReportDetail,
+  type ExpenseReportLineItem,
   type ReportGenerateResponse,
+  type ReportScopeDepartmentOption,
+  type ReportScopeEmployeeOption,
   type ReportVisualResult,
   type ExpenseReportSummary,
 } from '@/lib/api/backendClient'
 import { useAssistantPageContext } from '@/lib/assistant/AssistantProvider'
 import { useUiPreferences } from '@/lib/ui/preferences'
 
-const defaultPrompt = 'Generate expense reports for Sarah Chen and the Marketing team'
 const chartPalette = ['#0f766e', '#f59e0b', '#2563eb', '#dc2626', '#8b5cf6', '#059669', '#ea580c']
 const reportsPageSize = 20
-const reportPromptSuggestions = [
-  defaultPrompt,
-  'Generate a finance-ready report package for the Sales team',
-]
+const chartGridStroke = 'rgba(148,163,184,0.14)'
+const chartCursorFill = 'rgba(15,118,110,0.05)'
+const chartCursorStroke = 'rgba(15,118,110,0.18)'
+const verticalBarRadius: [number, number, number, number] = [12, 12, 3, 3]
+const horizontalBarRadius: [number, number, number, number] = [0, 12, 12, 0]
+const customPeriodPreset = 'custom'
+
+type ReportBuilderScope = 'employee' | 'department'
+type ReportPeriodPreset = '30' | '60' | '90' | typeof customPeriodPreset
 
 export function ReportsPage() {
   const [reports, setReports] = useState<ExpenseReportSummary[]>([])
   const [selectedReport, setSelectedReport] = useState<ExpenseReportDetail | null>(null)
-  const [prompt, setPrompt] = useState(defaultPrompt)
-  const [isLoading, setIsLoading] = useState(true)
+  const [builderScope, setBuilderScope] = useState<ReportBuilderScope>('employee')
+  const [employees, setEmployees] = useState<ReportScopeEmployeeOption[]>([])
+  const [departments, setDepartments] = useState<ReportScopeDepartmentOption[]>([])
+  const [selectedEmployeeId, setSelectedEmployeeId] = useState('')
+  const [selectedDepartmentId, setSelectedDepartmentId] = useState('')
+  const [periodPreset, setPeriodPreset] = useState<ReportPeriodPreset>('30')
+  const [customDateStart, setCustomDateStart] = useState('')
+  const [customDateEnd, setCustomDateEnd] = useState('')
+  const [latestTransactionDate, setLatestTransactionDate] = useState<string | null>(null)
+  const [isLoadingReports, setIsLoadingReports] = useState(true)
+  const [isLoadingScopeOptions, setIsLoadingScopeOptions] = useState(true)
   const [isLoadingMore, setIsLoadingMore] = useState(false)
   const [hasMoreReports, setHasMoreReports] = useState(false)
   const [isGenerating, setIsGenerating] = useState(false)
   const [generationResult, setGenerationResult] = useState<ReportGenerateResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const selectedReportRef = useRef<HTMLElement | null>(null)
   const { locale, t } = useUiPreferences()
   const currencyFormatter = useMemo(
     () =>
@@ -59,13 +76,40 @@ export function ReportsPage() {
     [locale],
   )
   const integerFormatter = useMemo(() => new Intl.NumberFormat(locale), [locale])
+  const selectedEmployee = useMemo(
+    () => employees.find((employee) => employee.id === selectedEmployeeId) ?? null,
+    [employees, selectedEmployeeId],
+  )
+  const selectedDepartment = useMemo(
+    () => departments.find((department) => department.id === selectedDepartmentId) ?? null,
+    [departments, selectedDepartmentId],
+  )
+  const periodRange = useMemo(
+    () => buildReportPeriodRange(periodPreset, customDateStart, customDateEnd, latestTransactionDate),
+    [customDateEnd, customDateStart, latestTransactionDate, periodPreset],
+  )
+  const builderLabel = builderScope === 'employee' ? selectedEmployee?.full_name : selectedDepartment?.name
+  const builderDepartmentHint = builderScope === 'employee' ? selectedEmployee?.department_name : null
+  const generatedPlannerRequest = useMemo(
+    () =>
+      buildGeneratedReportRequest({
+        builderScope,
+        label: builderLabel,
+        periodRange,
+      }),
+    [builderLabel, builderScope, periodRange],
+  )
+  const canGenerateReport =
+    Boolean(builderLabel) && Boolean(periodRange.start && periodRange.end && generatedPlannerRequest.trim().length > 0)
   const generatedReports = useMemo(() => generationResult?.reports ?? [], [generationResult])
+  const isRefreshing = isLoadingReports || isLoadingScopeOptions
   const teamSpendData = useMemo(() => buildTeamSpendData(generatedReports), [generatedReports])
   const teamFlagsData = useMemo(() => buildTeamFlagsData(generatedReports), [generatedReports])
   const categoryMixData = useMemo(() => buildCategoryMixData(selectedReport), [selectedReport])
   const monthlyTrendData = useMemo(() => buildMonthlyTrendData(selectedReport), [selectedReport])
   const policyMixData = useMemo(() => buildStatusMixData(selectedReport, 'policy'), [selectedReport])
   const riskMixData = useMemo(() => buildStatusMixData(selectedReport, 'risk'), [selectedReport])
+  const lineItemGroups = useMemo(() => groupReportLineItems(selectedReport), [selectedReport])
   const requestedVisuals = useMemo(() => selectedReport?.visuals ?? [], [selectedReport])
   const showGeneratedOverview = teamSpendData.length > 0 && (generatedReports.length > 1 || requestedVisuals.length === 0)
   const hasScanCoverageWarning = Boolean(
@@ -152,7 +196,7 @@ export function ReportsPage() {
   useAssistantPageContext(assistantContext)
 
   async function loadReports(selectReportId?: string) {
-    setIsLoading(true)
+    setIsLoadingReports(true)
     setError(null)
 
     try {
@@ -169,7 +213,29 @@ export function ReportsPage() {
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : 'Could not load reports.')
     } finally {
-      setIsLoading(false)
+      setIsLoadingReports(false)
+    }
+  }
+
+  async function loadScopeOptions() {
+    setIsLoadingScopeOptions(true)
+    setError(null)
+
+    try {
+      const scopeOptions = await getReportScopeOptions()
+      setEmployees(scopeOptions.employees)
+      setDepartments(scopeOptions.departments)
+      setLatestTransactionDate(scopeOptions.latest_transaction_date)
+      if (!selectedEmployeeId && scopeOptions.employees[0]) {
+        setSelectedEmployeeId(scopeOptions.employees[0].id)
+      }
+      if (!selectedDepartmentId && scopeOptions.departments[0]) {
+        setSelectedDepartmentId(scopeOptions.departments[0].id)
+      }
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Could not load report options.')
+    } finally {
+      setIsLoadingScopeOptions(false)
     }
   }
 
@@ -189,11 +255,24 @@ export function ReportsPage() {
   }
 
   async function generateDefaultReport() {
+    if (!canGenerateReport) {
+      return
+    }
+
     setIsGenerating(true)
     setError(null)
 
     try {
-      const report = await generateExpenseReport({ request: prompt, refresh_workflow: true })
+      const report = await generateExpenseReport({
+        request: generatedPlannerRequest,
+        employee_id: builderScope === 'employee' ? selectedEmployeeId : undefined,
+        employee_name: builderScope === 'employee' ? selectedEmployee?.full_name : undefined,
+        department_id: builderScope === 'department' ? selectedDepartmentId : undefined,
+        department_name: builderScope === 'department' ? selectedDepartment?.name : undefined,
+        date_start: periodRange.start,
+        date_end: periodRange.end,
+        refresh_workflow: true,
+      })
       setGenerationResult(report)
       setSelectedReport(report.reports[0] ?? null)
       await loadReports(report.reports[0]?.id)
@@ -217,7 +296,7 @@ export function ReportsPage() {
       policyMixData,
       riskMixData,
     })
-    const fileName = `${slugify(selectedReport.report_name ?? selectedReport.employee_name ?? 'report')}-visible-report.csv`
+    const fileName = `${slugify(selectedReport.report_name ?? selectedReport.employee_name ?? 'report')}-report.csv`
     downloadCsv(csv, fileName)
   }
 
@@ -244,17 +323,70 @@ export function ReportsPage() {
         }
       } finally {
         if (!ignore) {
-          setIsLoading(false)
+          setIsLoadingReports(false)
+        }
+      }
+    }
+
+    async function loadInitialScopeOptions() {
+      try {
+        const scopeOptions = await getReportScopeOptions()
+        if (ignore) {
+          return
+        }
+
+        setEmployees(scopeOptions.employees)
+        setDepartments(scopeOptions.departments)
+        setLatestTransactionDate(scopeOptions.latest_transaction_date)
+        if (!selectedEmployeeId && scopeOptions.employees[0]) {
+          setSelectedEmployeeId(scopeOptions.employees[0].id)
+        }
+        if (!selectedDepartmentId && scopeOptions.departments[0]) {
+          setSelectedDepartmentId(scopeOptions.departments[0].id)
+        }
+      } catch (loadError) {
+        if (!ignore) {
+          setError(loadError instanceof Error ? loadError.message : 'Could not load report options.')
+        }
+      } finally {
+        if (!ignore) {
+          setIsLoadingScopeOptions(false)
         }
       }
     }
 
     void loadInitialReports()
+    void loadInitialScopeOptions()
 
     return () => {
       ignore = true
     }
   }, [])
+
+  useEffect(() => {
+    if (!selectedReport || !selectedReportRef.current) {
+      return
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      selectedReportRef.current?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'start',
+      })
+    })
+
+    return () => window.cancelAnimationFrame(frame)
+  }, [selectedReport])
+
+  async function openReport(reportId: string) {
+    setError(null)
+
+    try {
+      setSelectedReport(await getExpenseReport(reportId))
+    } catch (detailError) {
+      setError(detailError instanceof Error ? detailError.message : 'Could not load report detail.')
+    }
+  }
 
   return (
     <PageScaffold
@@ -274,35 +406,125 @@ export function ReportsPage() {
                 <p className="mt-1 text-sm text-muted-foreground">{t('reports.reportBody')}</p>
               </div>
             </div>
-            <input
-              className="mt-4 h-10 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground"
-              value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-              placeholder={defaultPrompt}
-            />
-            <div className="mt-3 flex flex-wrap gap-2">
-              {reportPromptSuggestions.map((suggestion) => (
-                <button
-                  key={suggestion}
-                  type="button"
-                  className={`rounded-full border px-3 py-1.5 text-xs transition ${
-                    prompt === suggestion
-                      ? 'border-primary/25 bg-primary/10 text-primary'
-                      : 'border-border/70 bg-background text-muted-foreground hover:border-primary/20 hover:text-foreground'
-                  }`}
-                  onClick={() => setPrompt(suggestion)}
-                >
-                  {suggestion === defaultPrompt ? 'Sarah Chen quick start' : 'Team brief prompt'}
-                </button>
-              ))}
+            <div className="mt-4 grid gap-4">
+              <div className="flex flex-wrap gap-2">
+                {([
+                  { id: 'employee', label: 'Person', icon: UserRound },
+                  { id: 'department', label: 'Team', icon: Building2 },
+                ] as const).map((option) => {
+                  const Icon = option.icon
+                  const isActive = builderScope === option.id
+                  return (
+                    <button
+                      key={option.id}
+                      type="button"
+                      className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm transition ${
+                        isActive
+                          ? 'border-primary bg-primary text-primary-foreground'
+                          : 'border-border bg-background text-muted-foreground hover:border-primary/25 hover:text-foreground'
+                      }`}
+                      onClick={() => setBuilderScope(option.id)}
+                    >
+                      <Icon className="size-4" aria-hidden="true" />
+                      {option.label}
+                    </button>
+                  )
+                })}
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+                <label className="grid gap-1 text-sm">
+                  <span className="font-medium text-foreground">{builderScope === 'employee' ? 'Person' : 'Team'}</span>
+                  <select
+                    className="h-10 rounded-lg border border-input bg-background px-3 text-sm text-foreground"
+                    value={builderScope === 'employee' ? selectedEmployeeId : selectedDepartmentId}
+                    onChange={(event) =>
+                      builderScope === 'employee' ? setSelectedEmployeeId(event.target.value) : setSelectedDepartmentId(event.target.value)
+                    }
+                  >
+                    <option value="">{builderScope === 'employee' ? 'Select a person' : 'Select a team'}</option>
+                    {(builderScope === 'employee' ? employees : departments).map((option) => (
+                      <option key={option.id} value={option.id}>
+                        {'full_name' in option ? option.full_name : option.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <div className="rounded-lg border border-border/70 bg-muted/35 p-3 text-sm text-muted-foreground">
+                  <div className="flex items-center gap-2 font-medium text-foreground">
+                    <CalendarRange className="size-4" aria-hidden="true" />
+                    Report package
+                  </div>
+                  <p className="mt-1 leading-5">
+                    {builderLabel
+                      ? `Generate a manager-ready packet for ${builderLabel}${builderDepartmentHint ? ` in ${builderDepartmentHint}` : ''} using grouped recent transactions, live policy checks, risk signals, and approval workflow state.`
+                      : 'Choose a person or team to build a structured report package.'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid gap-3">
+                <div className="flex flex-wrap gap-2">
+                  {([
+                    { id: '30', label: 'Last 30 days' },
+                    { id: '60', label: 'Last 60 days' },
+                    { id: '90', label: 'Last 90 days' },
+                    { id: customPeriodPreset, label: 'Custom range' },
+                  ] as const).map((option) => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      className={`rounded-lg border px-3 py-2 text-sm transition ${
+                        periodPreset === option.id
+                          ? 'border-primary bg-primary text-primary-foreground'
+                          : 'border-border bg-background text-muted-foreground hover:border-primary/25 hover:text-foreground'
+                      }`}
+                      onClick={() => setPeriodPreset(option.id)}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+                {periodPreset === customPeriodPreset ? (
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="grid gap-1 text-sm">
+                      <span className="font-medium text-foreground">Start date</span>
+                      <input
+                        className="h-10 rounded-lg border border-input bg-background px-3 text-sm text-foreground"
+                        type="date"
+                        value={customDateStart}
+                        onChange={(event) => setCustomDateStart(event.target.value)}
+                      />
+                    </label>
+                    <label className="grid gap-1 text-sm">
+                      <span className="font-medium text-foreground">End date</span>
+                      <input
+                        className="h-10 rounded-lg border border-input bg-background px-3 text-sm text-foreground"
+                        type="date"
+                        value={customDateEnd}
+                        onChange={(event) => setCustomDateEnd(event.target.value)}
+                      />
+                    </label>
+                  </div>
+                ) : null}
+              </div>
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button type="button" variant="outline" onClick={() => void loadReports()} disabled={isLoading || isGenerating}>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                void loadReports()
+                void loadScopeOptions()
+              }}
+              disabled={isRefreshing || isGenerating}
+            >
               <RefreshCw className="size-4" aria-hidden="true" />
               {t('actions.refresh')}
             </Button>
-            <Button type="button" onClick={generateDefaultReport} disabled={isGenerating || !prompt.trim()}>
+            <Button type="button" onClick={generateDefaultReport} disabled={isGenerating || !canGenerateReport}>
               <Sparkles className="size-4" aria-hidden="true" />
               {isGenerating ? t('reports.generating') : t('reports.generate')}
             </Button>
@@ -341,34 +563,44 @@ export function ReportsPage() {
             <p className="text-sm font-semibold text-foreground">{t('reports.savedReportsTitle')}</p>
             <p className="mt-1 text-sm text-muted-foreground">{t('reports.savedReportsBody')}</p>
           </div>
-          {isLoading ? <p className="p-4 text-sm text-muted-foreground">{t('reports.loadingReports')}</p> : null}
-          {!isLoading && reports.length === 0 ? <p className="p-4 text-sm text-muted-foreground">{t('reports.noReports')}</p> : null}
-          <div className="desktop-scroll max-h-[22rem] divide-y divide-border/70 overflow-y-auto">
+          {isLoadingReports ? <p className="p-4 text-sm text-muted-foreground">{t('reports.loadingReports')}</p> : null}
+          {!isLoadingReports && reports.length === 0 ? <p className="p-4 text-sm text-muted-foreground">{t('reports.noReports')}</p> : null}
+          <div className="desktop-scroll max-h-[22rem] space-y-2 overflow-y-auto p-3">
             {reports.map((report) => (
               <button
                 key={report.id}
                 type="button"
-                className={`w-full px-4 py-3.5 text-left transition hover:bg-muted/70 ${
-                  selectedReport?.id === report.id ? 'bg-muted' : 'bg-background'
+                className={`w-full rounded-2xl border px-4 py-3.5 text-left transition ${
+                  selectedReport?.id === report.id
+                    ? 'border-primary/25 bg-primary/8'
+                    : 'border-border/70 bg-background hover:border-primary/20 hover:bg-muted/45'
                 }`}
-                onClick={() => {
-                      setError(null)
-                      void getExpenseReport(report.id)
-                    .then(setSelectedReport)
-                    .catch((detailError: unknown) => {
-                      setError(detailError instanceof Error ? detailError.message : 'Could not load report detail.')
-                    })
-                }}
+                onClick={() => void openReport(report.id)}
               >
-                <span className="block text-sm font-semibold text-foreground">
-                  {report.report_name ?? report.employee_name ?? t('reports.reportFallback')}
+                <span className="flex items-start justify-between gap-4">
+                  <span className="min-w-0">
+                    <span className="block truncate text-sm font-semibold text-foreground">
+                      {report.report_name ?? report.employee_name ?? t('reports.reportFallback')}
+                    </span>
+                    <span className="mt-1 block text-xs text-muted-foreground">
+                      {report.department_name ?? 'Assigned department'} · {report.period_start} to {report.period_end}
+                    </span>
+                  </span>
+                  <span className="shrink-0 text-right">
+                    <span className="block text-sm font-semibold tabular-nums text-foreground">
+                      {currencyFormatter.format(report.total_amount_cad)}
+                    </span>
+                    <span className="mt-1 block text-xs text-muted-foreground">{report.item_count.toLocaleString(locale)} items</span>
+                  </span>
                 </span>
-                <span className="mt-1 block text-xs text-muted-foreground">
-                  {report.period_start} to {report.period_end}
-                </span>
-                <span className="mt-2 flex items-center justify-between gap-3 text-xs text-muted-foreground">
-                  <span>{report.item_count.toLocaleString(locale)} items</span>
-                  <span className="font-medium text-foreground">{currencyFormatter.format(report.total_amount_cad)}</span>
+                <span className="mt-3 flex flex-wrap items-center gap-1.5">
+                  <StatusPill value={report.workflow_status ?? report.status ?? 'draft'} />
+                  <span className="status-chip bg-muted text-muted-foreground">
+                    {report.policy_flag_count.toLocaleString(locale)} policy flags
+                  </span>
+                  <span className="status-chip bg-muted text-muted-foreground">
+                    {report.risk_flag_count.toLocaleString(locale)} risk flags
+                  </span>
                 </span>
               </button>
             ))}
@@ -382,13 +614,17 @@ export function ReportsPage() {
           ) : null}
         </aside>
 
-        <section className="surface-panel overflow-hidden">
+        <section ref={selectedReportRef} className="surface-panel overflow-hidden scroll-mt-6">
           {!selectedReport ? (
             <p className="p-4 text-sm text-muted-foreground">{t('reports.reportSelectEmpty')}</p>
           ) : (
             <>
+              <div className="border-b border-border/70 p-5">
+                <p className="text-sm font-semibold text-foreground">Selected report</p>
+                <p className="mt-1 text-sm text-muted-foreground">Review the generated packet, visuals, and included transactions in one place.</p>
+              </div>
               <div className="flex flex-col gap-4 border-b border-border/70 p-5 lg:flex-row lg:items-start lg:justify-between">
-                <div>
+                <div className="min-w-0">
                   <p className="text-sm font-semibold text-foreground">
                     {selectedReport.report_name ?? selectedReport.employee_name ?? t('reports.reportFallback')}
                   </p>
@@ -403,13 +639,7 @@ export function ReportsPage() {
                 <div className="flex shrink-0 flex-wrap gap-2">
                   <Button type="button" variant="outline" onClick={exportVisibleCsv}>
                     <Download className="size-4" aria-hidden="true" />
-                    {t('reports.exportViewCsv')}
-                  </Button>
-                  <Button asChild variant="outline">
-                    <a href={getExpenseReportCsvUrl(selectedReport.id)}>
-                      <FileSpreadsheet className="size-4" aria-hidden="true" />
-                      {t('reports.exportLineItemsCsv')}
-                    </a>
+                    Export to CSV
                   </Button>
                 </div>
               </div>
@@ -459,12 +689,12 @@ export function ReportsPage() {
                     icon={<BarChart3 className="size-4" aria-hidden="true" />}
                   >
                     <ResponsiveContainer width="100%" height={320}>
-                      <BarChart data={teamSpendData} margin={{ top: 12, right: 12, bottom: 12, left: 0 }}>
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(148,163,184,0.22)" />
-                        <XAxis dataKey="employee" tickLine={false} axisLine={false} fontSize={12} interval={0} angle={-20} textAnchor="end" height={54} tickFormatter={truncateAxisLabel} />
+                      <BarChart data={teamSpendData} margin={{ top: 12, right: 12, bottom: 2, left: -6 }} barCategoryGap="32%">
+                        <CartesianGrid strokeDasharray="4 8" vertical={false} stroke={chartGridStroke} />
+                        <XAxis dataKey="employee" tickLine={false} axisLine={false} fontSize={11} interval={0} height={38} tickMargin={12} tickFormatter={truncateAxisLabel} />
                         <YAxis tickLine={false} axisLine={false} fontSize={12} tickFormatter={(value) => compactCurrency(value, locale)} />
-                        <Tooltip content={<CurrencyTooltip formatter={currencyFormatter} totalValue={sumNumericValues(teamSpendData, 'total')} />} cursor={{ fill: 'rgba(15,118,110,0.08)' }} />
-                        <Bar dataKey="total" radius={[8, 8, 0, 0]} fill="#0f766e" activeBar={{ fill: '#115e59' }} />
+                        <Tooltip content={<CurrencyTooltip formatter={currencyFormatter} totalValue={sumNumericValues(teamSpendData, 'total')} />} cursor={{ fill: chartCursorFill }} />
+                        <Bar dataKey="total" radius={verticalBarRadius} maxBarSize={34} fill="#0f766e" activeBar={{ fill: '#115e59' }} />
                       </BarChart>
                     </ResponsiveContainer>
                   </ChartPanel>
@@ -475,14 +705,14 @@ export function ReportsPage() {
                     icon={<LineChartIcon className="size-4" aria-hidden="true" />}
                   >
                     <ResponsiveContainer width="100%" height={320}>
-                      <BarChart data={teamFlagsData} margin={{ top: 12, right: 12, bottom: 12, left: 0 }}>
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(148,163,184,0.22)" />
-                        <XAxis dataKey="employee" tickLine={false} axisLine={false} fontSize={12} interval={0} angle={-20} textAnchor="end" height={54} tickFormatter={truncateAxisLabel} />
+                      <BarChart data={teamFlagsData} margin={{ top: 12, right: 12, bottom: 2, left: -6 }} barCategoryGap="30%">
+                        <CartesianGrid strokeDasharray="4 8" vertical={false} stroke={chartGridStroke} />
+                        <XAxis dataKey="employee" tickLine={false} axisLine={false} fontSize={11} interval={0} height={38} tickMargin={12} tickFormatter={truncateAxisLabel} />
                         <YAxis tickLine={false} axisLine={false} fontSize={12} />
-                        <Tooltip content={<CountTooltip formatter={integerFormatter} totalValue={sumNumericValues(teamFlagsData, 'policyFlags') + sumNumericValues(teamFlagsData, 'riskFlags')} />} cursor={{ fill: 'rgba(37,99,235,0.07)' }} />
+                        <Tooltip content={<CountTooltip formatter={integerFormatter} totalValue={sumNumericValues(teamFlagsData, 'policyFlags') + sumNumericValues(teamFlagsData, 'riskFlags')} />} cursor={{ fill: 'rgba(37,99,235,0.05)' }} />
                         <Legend formatter={renderLegendLabel} />
-                        <Bar dataKey="policyFlags" name={t('reports.policyFlags')} radius={[8, 8, 0, 0]} fill="#f59e0b" activeBar={{ fill: '#d97706' }} />
-                        <Bar dataKey="riskFlags" name={t('reports.riskFlags')} radius={[8, 8, 0, 0]} fill="#2563eb" activeBar={{ fill: '#1d4ed8' }} />
+                        <Bar dataKey="policyFlags" name={t('reports.policyFlags')} radius={verticalBarRadius} maxBarSize={26} fill="#f59e0b" activeBar={{ fill: '#d97706' }} />
+                        <Bar dataKey="riskFlags" name={t('reports.riskFlags')} radius={verticalBarRadius} maxBarSize={26} fill="#2563eb" activeBar={{ fill: '#1d4ed8' }} />
                       </BarChart>
                     </ResponsiveContainer>
                   </ChartPanel>
@@ -497,12 +727,12 @@ export function ReportsPage() {
                   icon={<BarChart3 className="size-4" aria-hidden="true" />}
                 >
                   <ResponsiveContainer width="100%" height={360}>
-                    <BarChart data={categoryMixData} layout="vertical" margin={{ top: 12, right: 12, bottom: 12, left: 0 }}>
-                      <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="rgba(148,163,184,0.22)" />
+                    <BarChart data={categoryMixData} layout="vertical" margin={{ top: 8, right: 12, bottom: 8, left: 0 }} barCategoryGap="28%">
+                      <CartesianGrid strokeDasharray="4 8" horizontal={false} stroke={chartGridStroke} />
                       <XAxis type="number" tickLine={false} axisLine={false} fontSize={12} tickFormatter={(value) => compactCurrency(value, locale)} />
-                      <YAxis type="category" dataKey="category" tickLine={false} axisLine={false} width={128} fontSize={12} tickFormatter={truncateAxisLabel} />
-                      <Tooltip content={<CurrencyTooltip formatter={currencyFormatter} categoryKey="category" totalValue={selectedReport.total_amount_cad} />} cursor={{ fill: 'rgba(37,99,235,0.07)' }} />
-                      <Bar dataKey="total" radius={[0, 8, 8, 0]} fill="#2563eb" activeBar={{ fill: '#1d4ed8' }} />
+                      <YAxis type="category" dataKey="category" tickLine={false} axisLine={false} width={136} fontSize={12} tickFormatter={truncateAxisLabel} />
+                      <Tooltip content={<CurrencyTooltip formatter={currencyFormatter} categoryKey="category" totalValue={selectedReport.total_amount_cad} />} cursor={{ fill: 'rgba(37,99,235,0.05)' }} />
+                      <Bar dataKey="total" radius={horizontalBarRadius} barSize={18} fill="#2563eb" activeBar={{ fill: '#1d4ed8' }} />
                     </BarChart>
                   </ResponsiveContainer>
                 </ChartPanel>
@@ -520,10 +750,10 @@ export function ReportsPage() {
                           <stop offset="95%" stopColor="#0f766e" stopOpacity={0.04} />
                         </linearGradient>
                       </defs>
-                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(148,163,184,0.22)" />
-                      <XAxis dataKey="month" tickLine={false} axisLine={false} fontSize={12} />
+                      <CartesianGrid strokeDasharray="4 8" vertical={false} stroke={chartGridStroke} />
+                      <XAxis dataKey="month" tickLine={false} axisLine={false} fontSize={12} tickMargin={12} />
                       <YAxis tickLine={false} axisLine={false} fontSize={12} tickFormatter={(value) => compactCurrency(value, locale)} />
-                      <Tooltip content={<CurrencyTooltip formatter={currencyFormatter} categoryKey="month" totalValue={sumNumericValues(monthlyTrendData, 'total')} />} cursor={{ stroke: 'rgba(15,118,110,0.22)', strokeWidth: 1 }} />
+                      <Tooltip content={<CurrencyTooltip formatter={currencyFormatter} categoryKey="month" totalValue={sumNumericValues(monthlyTrendData, 'total')} />} cursor={{ stroke: chartCursorStroke, strokeWidth: 1 }} />
                       <Area type="monotone" dataKey="total" stroke="#0f766e" fill="url(#reportSpendGradient)" strokeWidth={2.5} activeDot={{ r: 5, fill: '#0f766e', strokeWidth: 0 }} />
                     </AreaChart>
                   </ResponsiveContainer>
@@ -585,13 +815,20 @@ export function ReportsPage() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-border/70">
-                      {selectedReport.line_items.map((item) => (
-                        <tr key={item.id} className="table-row">
+                      {lineItemGroups.map((group) => {
+                        const item = group.representative
+                        return (
+                        <tr key={group.key} className="table-row">
                           <td className="px-4 py-3 text-muted-foreground">{item.transaction_date ?? '-'}</td>
-                          <td className="px-4 py-3 font-medium text-foreground">{item.merchant ?? '-'}</td>
+                          <td className="px-4 py-3 font-medium text-foreground">
+                            <div>{item.merchant ?? '-'}</div>
+                            {group.items.length > 1 ? (
+                              <div className="mt-1 text-xs font-normal text-primary">{group.items.length} linked rows in this review cluster</div>
+                            ) : null}
+                          </td>
                           <td className="px-4 py-3 text-muted-foreground">{item.category}</td>
                           <td className="px-4 py-3 text-right tabular-nums font-medium text-foreground">
-                            {currencyFormatter.format(item.amount_cad)}
+                            {currencyFormatter.format(group.totalAmount)}
                           </td>
                           <td className="px-4 py-3">
                             <StatusPill value={item.receipt_status ?? 'unknown'} />
@@ -626,7 +863,7 @@ export function ReportsPage() {
                           <td className="max-w-xs px-4 py-3 text-muted-foreground">{item.reviewer_next_action ?? '-'}</td>
                           <td className="px-4 py-3 text-muted-foreground">{item.business_purpose ?? '-'}</td>
                         </tr>
-                      ))}
+                      )})}
                     </tbody>
                   </table>
                 </div>
@@ -637,6 +874,59 @@ export function ReportsPage() {
       </section>
     </PageScaffold>
   )
+}
+
+function buildReportPeriodRange(
+  preset: ReportPeriodPreset,
+  customStart: string,
+  customEnd: string,
+  latestTransactionDate: string | null,
+): { start: string | null; end: string | null; label: string } {
+  if (preset === customPeriodPreset) {
+    const hasValidCustomRange = Boolean(customStart && customEnd && customStart <= customEnd)
+    return {
+      start: hasValidCustomRange ? customStart : null,
+      end: hasValidCustomRange ? customEnd : null,
+      label: hasValidCustomRange ? `${customStart} to ${customEnd}` : 'custom range',
+    }
+  }
+
+  const end = latestTransactionDate ? new Date(`${latestTransactionDate}T12:00:00`) : new Date()
+  const start = new Date()
+  start.setTime(end.getTime())
+  start.setDate(end.getDate() - (Number(preset) - 1))
+  return {
+    start: formatDateInputValue(start),
+    end: formatDateInputValue(end),
+    label: `last ${preset} days`,
+  }
+}
+
+function buildGeneratedReportRequest({
+  builderScope,
+  label,
+  periodRange,
+}: {
+  builderScope: ReportBuilderScope
+  label: string | null | undefined
+  periodRange: { start: string | null; end: string | null; label: string }
+}) {
+  if (!label || !periodRange.start || !periodRange.end) {
+    return ''
+  }
+
+  const scopeLabel = builderScope === 'department' ? `${label} team` : label
+  return [
+    `Generate an intelligent expense report package for ${scopeLabel}.`,
+    `Cover the period from ${periodRange.start} to ${periodRange.end}.`,
+    'Use grouped recent transactions, real-time policy checks, risk signals, and approval workflow status.',
+    'Include an executive summary, the most useful tables, clear approval blockers, notable policy pressure, and charts that explain spend and exceptions.',
+  ].join(' ')
+}
+
+function formatDateInputValue(value: Date) {
+  const localValue = new Date(value.getTime() - value.getTimezoneOffset() * 60000)
+  return localValue.toISOString().slice(0, 10)
 }
 
 function ReportMetric({ label, value }: { label: string; value: string }) {
@@ -661,8 +951,9 @@ function CfoReviewPanel({
   const denyCount = approvalCounts.deny ?? 0
   const approveCount = approvalCounts.approve ?? 0
   const unknownCount = approvalCounts.unknown ?? 0
-  const openApprovalItems = report.line_items.filter((item) => item.approval_request_id && item.approval_status === 'requested')
-  const recommendedItems = report.line_items.filter((item) => item.approval_recommendation)
+  const lineGroups = groupReportLineItems(report)
+  const openApprovalItems = lineGroups.filter((group) => group.representative.approval_request_id && group.representative.approval_status === 'requested')
+  const recommendedItems = lineGroups.filter((group) => group.representative.approval_recommendation)
   const headline = workflowHeadline(report.workflow_status)
 
   return (
@@ -719,10 +1010,15 @@ function CfoReviewPanel({
           <div className="border-t border-border/70 p-5">
             <p className="text-xs font-medium uppercase tracking-normal text-muted-foreground">Line-level recommendations</p>
             <div className="mt-3 grid gap-3">
-              {recommendedItems.slice(0, 5).map((item) => (
-                <div key={`${item.id}-recommendation`} className="rounded-lg border border-border/70 bg-background/70 p-3">
+              {recommendedItems.slice(0, 5).map((group) => {
+                const item = group.representative
+                return (
+                <div key={`${group.key}-recommendation`} className="rounded-lg border border-border/70 bg-background/70 p-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <p className="text-sm font-medium text-foreground">{item.merchant ?? 'Unknown merchant'}</p>
+                    <p className="text-sm font-medium text-foreground">
+                      {item.merchant ?? 'Unknown merchant'}
+                      {group.items.length > 1 ? <span className="ml-2 text-xs text-primary">{group.items.length} linked rows</span> : null}
+                    </p>
                     <div className="flex flex-wrap items-center gap-2">
                       <StatusPill value={item.approval_recommendation ?? 'unknown'} />
                       {item.approval_recommendation_confidence ? <StatusPill value={`${item.approval_recommendation_confidence}_confidence`} /> : null}
@@ -732,7 +1028,7 @@ function CfoReviewPanel({
                     <p className="mt-2 text-sm text-muted-foreground">{item.approval_recommendation_rationale}</p>
                   ) : null}
                 </div>
-              ))}
+              )})}
             </div>
           </div>
         ) : null}
@@ -741,23 +1037,28 @@ function CfoReviewPanel({
           <div className="border-t border-border/70 p-5">
             <p className="text-xs font-medium uppercase tracking-normal text-muted-foreground">Open approval packets</p>
             <div className="mt-3 grid gap-2">
-              {openApprovalItems.slice(0, 4).map((item) => (
+              {openApprovalItems.slice(0, 4).map((group) => {
+                const item = group.representative
+                return (
                 <button
-                  key={`${item.id}-approval-link`}
+                  key={`${group.key}-approval-link`}
                   type="button"
                   className="flex items-center justify-between gap-3 rounded-lg border border-border/70 bg-background/70 px-3 py-2 text-left transition hover:bg-muted/45"
                   onClick={() => item.approval_request_id && onOpenApproval(item.approval_request_id)}
                 >
                   <div>
                     <p className="text-sm font-medium text-foreground">{item.merchant ?? 'Unknown merchant'}</p>
-                    <p className="mt-1 text-xs text-muted-foreground">{item.approval_request_id}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {item.approval_request_id}
+                      {group.items.length > 1 ? ` · ${group.items.length} linked rows` : ''}
+                    </p>
                   </div>
                   <span className="inline-flex items-center gap-1 text-xs font-medium text-primary">
                     Open approval
                     <ArrowUpRight className="size-3" aria-hidden="true" />
                   </span>
                 </button>
-              ))}
+              )})}
             </div>
           </div>
         ) : null}
@@ -820,15 +1121,15 @@ function ChartPanel({
   className?: string
 }) {
   return (
-    <div className={`subtle-panel overflow-hidden p-5 ${className}`}>
+    <div className={`subtle-panel overflow-hidden rounded-[22px] border border-border/70 bg-background/55 p-5 shadow-[0_18px_40px_-26px_rgba(15,23,42,0.65)] ${className}`}>
       <div className="mb-4 flex items-start gap-3">
-        <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">{icon}</span>
+        <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">{icon}</span>
         <div>
           <p className="text-sm font-semibold text-foreground">{title}</p>
           <p className="mt-1 text-sm text-muted-foreground">{subtitle}</p>
         </div>
       </div>
-      {children}
+      <div className="rounded-[18px] border border-border/60 bg-background/60 p-3 sm:p-4">{children}</div>
     </div>
   )
 }
@@ -845,12 +1146,15 @@ function MiniPieChart({
   const safeData = data.length > 0 ? data : [{ label: 'none', value: 1 }]
 
   return (
-    <div className="rounded-lg border border-border/70 bg-background/70 p-4">
-      <p className="text-xs font-medium uppercase tracking-normal text-muted-foreground">{title}</p>
-      <ResponsiveContainer width="100%" height={220}>
+    <div className="rounded-[18px] border border-border/70 bg-background/70 p-4">
+      <div className="mb-1 flex items-center justify-between gap-3">
+        <p className="text-xs font-medium uppercase tracking-normal text-muted-foreground">{title}</p>
+        <span className="text-xs text-muted-foreground">{formatter.format(data.reduce((sum, entry) => sum + entry.value, 0))} total</span>
+      </div>
+      <ResponsiveContainer width="100%" height={190}>
         <PieChart>
           <Tooltip content={<SimplePieTooltip formatter={formatter} totalValue={data.reduce((sum, entry) => sum + entry.value, 0)} />} />
-          <Pie data={safeData} dataKey="value" nameKey="label" innerRadius={42} outerRadius={66} paddingAngle={3}>
+          <Pie data={safeData} dataKey="value" nameKey="label" innerRadius={48} outerRadius={74} paddingAngle={2} stroke="rgba(15,23,42,0.08)" strokeWidth={1}>
             {safeData.map((entry, index) => (
               <Cell key={`${entry.label}-${index}`} fill={chartPalette[index % chartPalette.length]} />
             ))}
@@ -859,9 +1163,9 @@ function MiniPieChart({
       </ResponsiveContainer>
       <div className="grid gap-2">
         {data.map((entry, index) => (
-          <div key={entry.label} className="flex items-center justify-between gap-3 text-xs">
+          <div key={entry.label} className="flex items-center justify-between gap-3 rounded-xl border border-border/50 bg-background/60 px-3 py-2 text-xs">
             <span className="flex items-center gap-2 text-muted-foreground">
-              <span className="size-2 rounded-full" style={{ backgroundColor: chartPalette[index % chartPalette.length] }} />
+              <span className="size-2.5 rounded-full" style={{ backgroundColor: chartPalette[index % chartPalette.length] }} />
               {formatLabel(entry.label)}
             </span>
             <span className="font-medium text-foreground">{formatter.format(entry.value)}</span>
@@ -920,7 +1224,7 @@ function ReportVisualRenderer({
       <ResponsiveContainer width="100%" height={300}>
         <PieChart>
           <Tooltip content={<VisualTooltip formatter={formatter} totalValue={totalValue} />} />
-          <Pie data={visual.rows} dataKey={dataKey} nameKey="label" innerRadius={48} outerRadius={88} paddingAngle={3}>
+          <Pie data={visual.rows} dataKey={dataKey} nameKey="label" innerRadius={56} outerRadius={92} paddingAngle={2} stroke="rgba(15,23,42,0.08)" strokeWidth={1}>
             {visual.rows.map((row, index) => (
               <Cell key={`${row.label}-${index}`} fill={chartPalette[index % chartPalette.length]} />
             ))}
@@ -940,15 +1244,15 @@ function ReportVisualRenderer({
               <stop offset="95%" stopColor="#0f766e" stopOpacity={0.04} />
             </linearGradient>
           </defs>
-          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(148,163,184,0.22)" />
-          <XAxis dataKey="label" tickLine={false} axisLine={false} fontSize={12} />
+          <CartesianGrid strokeDasharray="4 8" vertical={false} stroke={chartGridStroke} />
+          <XAxis dataKey="label" tickLine={false} axisLine={false} fontSize={12} tickMargin={12} />
           <YAxis
             tickLine={false}
             axisLine={false}
             fontSize={12}
             tickFormatter={(value) => (isCurrencyMetric ? compactCurrency(value, locale) : integerFormatter.format(value))}
           />
-          <Tooltip content={<VisualTooltip formatter={formatter} totalValue={totalValue} />} cursor={{ stroke: 'rgba(15,118,110,0.22)', strokeWidth: 1 }} />
+          <Tooltip content={<VisualTooltip formatter={formatter} totalValue={totalValue} />} cursor={{ stroke: chartCursorStroke, strokeWidth: 1 }} />
           <Area type="monotone" dataKey={dataKey} stroke="#0f766e" fill={`url(#visualGradient-${visual.id})`} strokeWidth={2.5} activeDot={{ r: 5, fill: '#0f766e', strokeWidth: 0 }} />
         </AreaChart>
       </ResponsiveContainer>
@@ -957,17 +1261,17 @@ function ReportVisualRenderer({
 
   return (
     <ResponsiveContainer width="100%" height={320}>
-      <BarChart data={visual.rows} margin={{ top: 12, right: 12, bottom: 12, left: 0 }}>
-        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(148,163,184,0.22)" />
-        <XAxis dataKey="label" tickLine={false} axisLine={false} fontSize={12} interval={0} angle={-20} textAnchor="end" height={54} />
+      <BarChart data={visual.rows} margin={{ top: 12, right: 12, bottom: 2, left: -6 }} barCategoryGap="30%">
+        <CartesianGrid strokeDasharray="4 8" vertical={false} stroke={chartGridStroke} />
+        <XAxis dataKey="label" tickLine={false} axisLine={false} fontSize={11} interval={0} height={38} tickMargin={12} tickFormatter={truncateAxisLabel} />
         <YAxis
           tickLine={false}
           axisLine={false}
           fontSize={12}
           tickFormatter={(value) => (isCurrencyMetric ? compactCurrency(value, locale) : integerFormatter.format(value))}
         />
-        <Tooltip content={<VisualTooltip formatter={formatter} totalValue={totalValue} />} cursor={{ fill: 'rgba(15,118,110,0.08)' }} />
-        <Bar dataKey={dataKey} radius={[8, 8, 0, 0]} fill="#0f766e" activeBar={{ fill: '#115e59' }} />
+        <Tooltip content={<VisualTooltip formatter={formatter} totalValue={totalValue} />} cursor={{ fill: chartCursorFill }} />
+        <Bar dataKey={dataKey} radius={verticalBarRadius} maxBarSize={34} fill="#0f766e" activeBar={{ fill: '#115e59' }} />
       </BarChart>
     </ResponsiveContainer>
   )
@@ -1062,6 +1366,56 @@ function buildStatusMixData(report: ExpenseReportDetail | null, type: 'policy' |
   return [...counts.entries()]
     .map(([label, value]) => ({ label, value }))
     .sort((left, right) => right.value - left.value)
+}
+
+type ReportLineGroup = {
+  key: string
+  items: ExpenseReportLineItem[]
+  representative: ExpenseReportLineItem
+  totalAmount: number
+}
+
+function groupReportLineItems(report: ExpenseReportDetail | null): ReportLineGroup[] {
+  if (!report) {
+    return []
+  }
+
+  const groups = new Map<string, ExpenseReportLineItem[]>()
+  for (const item of report.line_items) {
+    const key = item.review_group_key ?? fallbackReportGroupKey(item)
+    groups.set(key, [...(groups.get(key) ?? []), item])
+  }
+
+  return Array.from(groups.entries()).map(([key, items]) => {
+    const sortedItems = [...items].sort((left, right) => (left.transaction_date ?? '').localeCompare(right.transaction_date ?? '') || left.id.localeCompare(right.id))
+    const representative = sortedItems[0]
+
+    return {
+      key,
+      items: sortedItems,
+      representative,
+      totalAmount: Number(
+        (representative.review_group_total_amount_cad || sortedItems.reduce((total, item) => total + item.amount_cad, 0)).toFixed(2),
+      ),
+    }
+  })
+}
+
+function fallbackReportGroupKey(item: ExpenseReportLineItem) {
+  if (!item.merchant || !item.transaction_date) {
+    return `transaction:${item.transaction_id}`
+  }
+
+  return [
+    'review-context',
+    normalizeGroupValue(item.merchant),
+    item.transaction_date,
+    normalizeGroupValue(item.category),
+  ].join('|')
+}
+
+function normalizeGroupValue(value: string | null | undefined) {
+  return (value ?? 'unknown').trim().toLowerCase().replace(/\s+/g, ' ')
 }
 
 function buildVisibleReportCsv({

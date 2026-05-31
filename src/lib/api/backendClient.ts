@@ -363,6 +363,24 @@ export type ReportGenerateRequest = {
   refresh_workflow?: boolean
 }
 
+export type ReportScopeEmployeeOption = {
+  id: string
+  full_name: string
+  department_id: string | null
+  department_name: string | null
+}
+
+export type ReportScopeDepartmentOption = {
+  id: string
+  name: string
+}
+
+export type ReportScopeOptionsResponse = {
+  employees: ReportScopeEmployeeOption[]
+  departments: ReportScopeDepartmentOption[]
+  latest_transaction_date: string | null
+}
+
 export type ExpenseReportLineItem = {
   id: string
   transaction_id: string
@@ -385,6 +403,10 @@ export type ExpenseReportLineItem = {
   approval_recommendation: 'approve' | 'deny' | null
   approval_recommendation_confidence: 'low' | 'medium' | 'high' | null
   approval_recommendation_rationale: string | null
+  review_group_key: string | null
+  review_group_size: number
+  review_group_total_amount_cad: number
+  review_group_transaction_ids: string[]
   business_purpose: string | null
   guest_names: string[]
 }
@@ -529,6 +551,24 @@ export type ApprovalRecommendation = {
   source: 'deterministic_fallback' | 'openai_structured_output'
 }
 
+export type ApprovalExplanationReason = {
+  label: string
+  severity: 'info' | 'warning' | 'blocking'
+  detail: string
+}
+
+export type ApprovalExplanation = {
+  decision: 'approve' | 'deny'
+  confidence: 'low' | 'medium' | 'high'
+  summary: string
+  blocking_reasons: ApprovalExplanationReason[]
+  supporting_evidence: string[]
+  missing_information: string[]
+  cited_policy_clauses: CitedPolicyClause[]
+  would_change_outcome_if: string[]
+  generated_by: string
+}
+
 export type DepartmentBudgetStatus = {
   department_id: string | null
   department_name: string | null
@@ -601,6 +641,10 @@ export type ApprovalRequestItem = {
   risk_signals: RiskSignal[]
   ai_recommendation: ApprovalRecommendation | null
   reviewer_brief: ReviewerBrief | null
+  review_group_key: string | null
+  review_group_size: number
+  review_group_total_amount_cad: number
+  review_group_transaction_ids: string[]
   budget_status: DepartmentBudgetStatus | null
   spend_history: EmployeeSpendHistory | null
   requester_note: string | null
@@ -613,6 +657,7 @@ export type ApprovalRequestItem = {
 
 export type ApprovalRequestDetail = ApprovalRequestItem & {
   context_snapshot: ApprovalContextSnapshot | null
+  approval_explanation: ApprovalExplanation | null
   audit_events: Record<string, unknown>[]
 }
 
@@ -685,6 +730,10 @@ export type ReviewQueueItem = {
   ai_context: string | null
   reviewer_brief: ReviewerBrief | null
   next_action: string
+  review_group_key: string | null
+  review_group_size: number
+  review_group_total_amount_cad: number
+  review_group_transaction_ids: string[]
   generated_at: string | null
 }
 
@@ -1124,6 +1173,10 @@ export function generateExpenseReport(request: ReportGenerateRequest = {}) {
   })
 }
 
+export function getReportScopeOptions() {
+  return fetchJson<ReportScopeOptionsResponse>('/reports/scope-options')
+}
+
 export function listExpenseReports(filters: { limit?: number; offset?: number } = {}) {
   const query = new URLSearchParams()
   if (filters.limit) {
@@ -1236,6 +1289,10 @@ export function createApprovalRequest(request: ApprovalRequestCreate) {
 
 export function getApprovalRequest(approvalId: string) {
   return fetchJson<ApprovalRequestDetail>(`/approvals/${approvalId}`)
+}
+
+export function getApprovalExplanation(approvalId: string) {
+  return fetchJson<ApprovalExplanation>(`/approvals/${approvalId}/explanation`)
 }
 
 export function decideApprovalRequest(approvalId: string, request: ApprovalDecisionRequest) {

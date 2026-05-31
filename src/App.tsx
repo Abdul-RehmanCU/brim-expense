@@ -49,7 +49,9 @@ function App() {
   return (
     <AppShell activeRouteId={activeRoute.id} onNavigate={handleNavigate}>
       <Suspense fallback={<PageLoadingFallback label={activeRoute.label} />}>
-        <ActivePage />
+        <div key={path} className="route-fade-in">
+          <ActivePage />
+        </div>
       </Suspense>
     </AppShell>
   )

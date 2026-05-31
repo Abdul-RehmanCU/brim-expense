@@ -462,6 +462,29 @@ def test_amount_only_preauthorization_rule_is_blocked_from_activation():
     assert any("must check approval evidence" in error for error in policy_service.activation_guardrail_errors(canonical))
 
 
+def test_duplicate_pattern_rule_is_blocked_from_activation_without_clustering_facts():
+    canonical, validation_errors = policy_service.canonicalize_rule_json(
+        {
+            "condition": {"field": "merchant_normalized", "operator": "exists"},
+            "outcome": {
+                "status": "review_required",
+                "violation": {
+                    "rule_code": "DUPLICATE_REVIEW_AI",
+                    "severity": "high",
+                    "explanation": "Duplicate or near-duplicate charges should be reviewed.",
+                    "required_action": "Check duplicate linkage.",
+                },
+            },
+        },
+        "DUPLICATE_REVIEW_AI",
+        "Duplicate charge review",
+        "high",
+    )
+
+    assert validation_errors == []
+    assert any("dedicated clustering or risk facts" in error for error in policy_service.activation_guardrail_errors(canonical))
+
+
 def test_existing_broad_active_rule_is_not_loaded_for_scan():
     row = {
         "rule_code": "POLICY_001_FALSIFICATION_PROHIBITED",

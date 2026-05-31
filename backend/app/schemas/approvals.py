@@ -3,7 +3,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from app.schemas.policy import PolicyStatus, Severity
-from app.schemas.review_queue import ReviewerBrief
+from app.schemas.review_queue import CitedPolicyClause, ReviewerBrief
 from app.schemas.risk import RiskLevel, RiskSignal
 
 ApprovalStatus = Literal["draft", "requested", "approved", "denied", "cancelled"]
@@ -11,6 +11,7 @@ ApprovalDecision = Literal["approved", "denied", "cancelled"]
 ApprovalRecommendationValue = Literal["approve", "deny"]
 ApprovalRecommendationConfidence = Literal["low", "medium", "high"]
 ApprovalRecommendationSource = Literal["deterministic_fallback", "openai_structured_output"]
+ApprovalExplanationSeverity = Literal["info", "warning", "blocking"]
 
 
 class ApprovalRecommendation(BaseModel):
@@ -20,6 +21,24 @@ class ApprovalRecommendation(BaseModel):
     grounded_inputs: list[str] = Field(default_factory=list)
     missing_information: list[str] = Field(default_factory=list)
     source: ApprovalRecommendationSource = "deterministic_fallback"
+
+
+class ApprovalExplanationReason(BaseModel):
+    label: str
+    severity: ApprovalExplanationSeverity = "warning"
+    detail: str
+
+
+class ApprovalExplanation(BaseModel):
+    decision: ApprovalRecommendationValue
+    confidence: ApprovalRecommendationConfidence = "medium"
+    summary: str
+    blocking_reasons: list[ApprovalExplanationReason] = Field(default_factory=list)
+    supporting_evidence: list[str] = Field(default_factory=list)
+    missing_information: list[str] = Field(default_factory=list)
+    cited_policy_clauses: list[CitedPolicyClause] = Field(default_factory=list)
+    would_change_outcome_if: list[str] = Field(default_factory=list)
+    generated_by: str = "deterministic_packet_explainer"
 
 
 class DepartmentBudgetStatus(BaseModel):
@@ -94,6 +113,10 @@ class ApprovalRequestItem(BaseModel):
     risk_signals: list[RiskSignal] = Field(default_factory=list)
     ai_recommendation: ApprovalRecommendation | None = None
     reviewer_brief: ReviewerBrief | None = None
+    review_group_key: str | None = None
+    review_group_size: int = 1
+    review_group_total_amount_cad: float = 0
+    review_group_transaction_ids: list[str] = Field(default_factory=list)
     budget_status: DepartmentBudgetStatus | None = None
     spend_history: EmployeeSpendHistory | None = None
     requester_note: str | None = None
@@ -106,6 +129,7 @@ class ApprovalRequestItem(BaseModel):
 
 class ApprovalRequestDetail(ApprovalRequestItem):
     context_snapshot: ApprovalContextSnapshot | None = None
+    approval_explanation: ApprovalExplanation | None = None
     audit_events: list[dict[str, Any]] = Field(default_factory=list)
 
 

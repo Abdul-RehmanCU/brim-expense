@@ -13,7 +13,6 @@ The shell routes are live workflow surfaces. Keep this contract aligned with the
   - `/talk-to-data`
   - `/transactions`
   - `/compliance`
-  - `/risk-radar`
   - `/approvals`
   - `/reports`
   - `/policy-rules`
@@ -25,7 +24,6 @@ The shell routes are live workflow surfaces. Keep this contract aligned with the
 - Talk to Data: chat and chart/table answers.
 - Transactions: normalized transaction table after import.
 - Compliance: deterministic policy scan results.
-- Risk Radar: explainable risk signals from backend-owned risk workflows.
 - Approvals: promotes merged review queue items into durable approval requests, shows complete policy/risk/budget/history/citation/readiness decision packets, and records human approve/deny decisions.
 - Reports: expense report generation with workflow metrics, citations, visuals, CSV export, and approval/readiness context.
 - Policy Rules: configurable policy rule review, including seeded, manual, and AI-extracted draft rules.

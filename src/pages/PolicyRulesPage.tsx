@@ -3,8 +3,6 @@ import {
   ClipboardCheck,
   FileSearch,
   FileText,
-  PlayCircle,
-  RefreshCw,
   Sparkles,
   ToggleLeft,
   ToggleRight,
@@ -23,14 +21,12 @@ import {
   listPolicyRules,
   resetPolicyData,
   scanPolicy,
-  testPolicyRule,
   updatePolicyRule,
   uploadPolicyDocumentPdf,
   type PolicyDocumentCreateResponse,
   type PolicyDocumentItem,
   type PolicyRuleExtractionResponse,
   type PolicyRuleItem,
-  type PolicyRuleTestResponse,
   type PolicyRuleStatus,
   type PolicySeverity,
 } from '@/lib/api/backendClient'
@@ -136,15 +132,12 @@ const policyRulesPageSize = 25
 export function PolicyRulesPage() {
   const [rules, setRules] = useState<PolicyRuleItem[]>([])
   const [isLoading, setIsLoading] = useState(true)
-  const [isLoadingMore, setIsLoadingMore] = useState(false)
-  const [hasMoreRules, setHasMoreRules] = useState(false)
   const [isExtracting, setIsExtracting] = useState(false)
   const [isIngesting, setIsIngesting] = useState(false)
   const [isScanning, setIsScanning] = useState(false)
   const [isResetting, setIsResetting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [statusMessage, setStatusMessage] = useState<string | null>(null)
-  const [testResult, setTestResult] = useState<PolicyRuleTestResponse | null>(null)
   const [ingestMode, setIngestMode] = useState<IngestMode>('text')
   const [documentTitle, setDocumentTitle] = useState('')
   const [policyText, setPolicyText] = useState('')
@@ -269,7 +262,6 @@ export function PolicyRulesPage() {
     setDocumentTitle('')
     setPolicyText('')
     setPolicyFile(null)
-    setTestResult(null)
   }
 
   function syncRuleState(updated: PolicyRuleItem) {
@@ -292,26 +284,10 @@ export function PolicyRulesPage() {
     try {
       const loadedRules = await listPolicyRules({ limit: policyRulesPageSize })
       setRules(loadedRules)
-      setHasMoreRules(loadedRules.length === policyRulesPageSize)
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : t('policyRules.loadError'))
     } finally {
       setIsLoading(false)
-    }
-  }
-
-  async function loadMoreRules() {
-    setIsLoadingMore(true)
-    setError(null)
-
-    try {
-      const loadedRules = await listPolicyRules({ limit: policyRulesPageSize, offset: rules.length })
-      setRules((currentRules) => [...currentRules, ...loadedRules])
-      setHasMoreRules(loadedRules.length === policyRulesPageSize)
-    } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : t('policyRules.loadError'))
-    } finally {
-      setIsLoadingMore(false)
     }
   }
 
@@ -435,19 +411,6 @@ export function PolicyRulesPage() {
     }
   }
 
-  async function runRuleTest(rule: PolicyRuleItem) {
-    setError(null)
-    setStatusMessage(null)
-
-    try {
-      const result = await testPolicyRule(rule.id, { rule_json: rule.rule_json, sample_limit: 5 })
-      setTestResult(result)
-      setStatusMessage(result.valid ? t('policyRules.validationPassed') : t('policyRules.validationFailed'))
-    } catch (ruleError) {
-      setError(ruleError instanceof Error ? ruleError.message : t('policyRules.testError'))
-    }
-  }
-
   async function runScanWithActiveRules(successMessage?: string) {
     setError(null)
     setStatusMessage(null)
@@ -503,7 +466,6 @@ export function PolicyRulesPage() {
         const loadedRules = await listPolicyRules({ limit: policyRulesPageSize })
         if (!ignore) {
           setRules(loadedRules)
-          setHasMoreRules(loadedRules.length === policyRulesPageSize)
         }
       } catch (loadError) {
         if (!ignore) {
@@ -529,10 +491,10 @@ export function PolicyRulesPage() {
       title={t('policyRules.title')}
       description={t('policyRules.description')}
     >
-      <section className="grid gap-4 min-[1200px]:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+      <section className="grid items-start gap-4 min-[1200px]:grid-cols-[minmax(0,1.14fr)_minmax(320px,0.86fr)]">
         <div className="grid gap-4">
           <section className="surface-panel overflow-hidden">
-            <div className="flex flex-col gap-3 border-b border-border/70 p-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-start gap-3 border-b border-border/70 p-4">
               <div className="flex items-start gap-3">
                 <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
                   <Upload className="size-4" aria-hidden="true" />
@@ -541,27 +503,6 @@ export function PolicyRulesPage() {
                   <p className="text-sm font-semibold text-foreground">{PAGE_COPY.policySource}</p>
                   <p className="mt-1 text-sm text-muted-foreground">{PAGE_COPY.policySourceBody}</p>
                 </div>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={loadRules}
-                  disabled={isLoading || isExtracting || isIngesting || isResetting}
-                >
-                  <RefreshCw className="size-4" aria-hidden="true" />
-                  {t('actions.refresh')}
-                </Button>
-                {hasMoreRules ? (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => void loadMoreRules()}
-                    disabled={isLoadingMore || isLoading || isExtracting || isIngesting || isResetting}
-                  >
-                    {isLoadingMore ? 'Loading more...' : 'Load more rules'}
-                  </Button>
-                ) : null}
               </div>
             </div>
 
@@ -669,6 +610,99 @@ export function PolicyRulesPage() {
             </div>
           </section>
 
+          <section className="surface-panel overflow-hidden">
+            <div className="flex items-start gap-3 border-b border-border/70 p-4">
+              <div className="flex items-start gap-3">
+                <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                  <ClipboardCheck className="size-4" aria-hidden="true" />
+                </span>
+                <div>
+                  <p className="text-sm font-semibold text-foreground">{PAGE_COPY.followUpRules}</p>
+                  <p className="mt-1 text-sm text-muted-foreground">{PAGE_COPY.draftReviewBody}</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="border-b border-border/70 bg-muted/60 px-4 py-3">
+              <p className="text-sm text-muted-foreground">{PAGE_COPY.followUpSummary}</p>
+              {reviewableDraftRules.length > 0 ? (
+                <div className="mt-2 grid gap-2">
+                  <p className="text-sm font-medium text-foreground">
+                    {PAGE_COPY.followUpNeeded.replace('{count}', reviewableDraftRules.length.toLocaleString())}
+                  </p>
+                  {skippedReasonCounts.length > 0 ? (
+                    <div className="flex flex-wrap gap-2">
+                      {skippedReasonCounts.map((reason) => (
+                        <span key={reason.label} className="status-chip bg-amber-100 text-amber-800 dark:bg-amber-400/15 dark:text-amber-100">
+                          {reason.label}: {reason.count}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                  <p className="text-sm text-muted-foreground">{PAGE_COPY.manualOverrideHint}</p>
+                </div>
+              ) : null}
+            </div>
+
+            {isLoading ? <p className="p-4 text-sm text-muted-foreground">{t('policyRules.loading')}</p> : null}
+            {!isLoading && reviewRules.length === 0 ? (
+              <p className="p-4 text-sm text-muted-foreground">{PAGE_COPY.noDraftRules}</p>
+            ) : null}
+
+            {reviewRules.length > 0 ? (
+              <div className="max-h-[48rem] divide-y divide-border/70 overflow-y-auto">
+                {reviewRules.map((rule) => {
+                  const reviewAnalysis = reviewAnalysisById[rule.id]
+
+                  return (
+                  <article key={rule.id} className="grid gap-3 px-4 py-3 min-[1100px]:grid-cols-[minmax(0,1fr)_11rem]">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-mono text-xs text-muted-foreground">{rule.rule_code}</span>
+                        <RuleStatusPill status={rule.status} />
+                        <SeverityPill severity={rule.severity} />
+                        {reviewAnalysis?.autoAcceptable ? <RecommendedPill /> : null}
+                        <span className="status-chip bg-muted text-muted-foreground">
+                          {formatSourceType(rule.source_type)}
+                        </span>
+                      </div>
+                      <h2 className="mt-2 text-base font-semibold text-foreground">{rule.name}</h2>
+                      <p className="mt-1 text-sm leading-5 text-muted-foreground">{rule.description}</p>
+                      {rule.source_text ? (
+                        <p className="mt-2.5 text-sm leading-5 text-foreground">{summarizeText(rule.source_text, 180)}</p>
+                      ) : null}
+                      {rule.validation_errors.length > 0 ? (
+                        <ul className="mt-2.5 list-disc space-y-1 pl-4 text-sm text-red-700 dark:text-red-100">
+                          {rule.validation_errors.map((validationError) => (
+                            <li key={validationError}>{validationError}</li>
+                          ))}
+                        </ul>
+                      ) : null}
+                      {reviewAnalysis ? <RuleReviewSignals analysis={reviewAnalysis} /> : null}
+                      <RuleJsonDetails ruleJson={rule.rule_json} />
+                    </div>
+                    <div className="flex flex-wrap items-start justify-start gap-2 min-[1100px]:flex-col min-[1100px]:items-stretch">
+                      {rule.status === 'active' ? (
+                        <Button type="button" size="sm" variant="outline" onClick={() => disableRule(rule)}>
+                          <ToggleLeft className="size-4" aria-hidden="true" />
+                          {t('policyRules.disable')}
+                        </Button>
+                      ) : (
+                        <Button type="button" size="sm" onClick={() => activateRule(rule)}>
+                          <ToggleRight className="size-4" aria-hidden="true" />
+                          {PAGE_COPY.activateOverride}
+                        </Button>
+                      )}
+                    </div>
+                  </article>
+                  )
+                })}
+              </div>
+            ) : null}
+          </section>
+        </div>
+
+        <aside className="grid gap-4">
           <section className="surface-panel overflow-hidden">
             <div className="flex items-start gap-3 border-b border-border/70 p-4">
               <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
@@ -794,129 +828,6 @@ export function PolicyRulesPage() {
           </section>
 
           <section className="surface-panel overflow-hidden">
-            <div className="flex flex-col gap-3 border-b border-border/70 p-4 sm:flex-row sm:items-center sm:justify-between">
-              <div className="flex items-start gap-3">
-                <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                  <ClipboardCheck className="size-4" aria-hidden="true" />
-                </span>
-                <div>
-                  <p className="text-sm font-semibold text-foreground">{PAGE_COPY.followUpRules}</p>
-                  <p className="mt-1 text-sm text-muted-foreground">{PAGE_COPY.draftReviewBody}</p>
-                </div>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={loadRules}
-                  disabled={isLoading || isScanning || isResetting}
-                >
-                  <RefreshCw className="size-4" aria-hidden="true" />
-                  {t('actions.refresh')}
-                </Button>
-                <Button
-                  type="button"
-                  onClick={async () => {
-                    setIsScanning(true)
-                    try {
-                      await runScanWithActiveRules()
-                    } finally {
-                      setIsScanning(false)
-                    }
-                  }}
-                  disabled={isScanning || isResetting}
-                >
-                  <PlayCircle className="size-4" aria-hidden="true" />
-                  {isScanning ? t('actions.scanning') : PAGE_COPY.runWorkflowRefresh}
-                </Button>
-              </div>
-            </div>
-
-            <div className="border-b border-border/70 bg-muted/60 px-4 py-3">
-              <p className="text-sm text-muted-foreground">{PAGE_COPY.followUpSummary}</p>
-              {reviewableDraftRules.length > 0 ? (
-                <div className="mt-2 grid gap-2">
-                  <p className="text-sm font-medium text-foreground">
-                    {PAGE_COPY.followUpNeeded.replace('{count}', reviewableDraftRules.length.toLocaleString())}
-                  </p>
-                  {skippedReasonCounts.length > 0 ? (
-                    <div className="flex flex-wrap gap-2">
-                      {skippedReasonCounts.map((reason) => (
-                        <span key={reason.label} className="status-chip bg-amber-100 text-amber-800 dark:bg-amber-400/15 dark:text-amber-100">
-                          {reason.label}: {reason.count}
-                        </span>
-                      ))}
-                    </div>
-                  ) : null}
-                  <p className="text-sm text-muted-foreground">{PAGE_COPY.manualOverrideHint}</p>
-                </div>
-              ) : null}
-            </div>
-
-            {isLoading ? <p className="p-4 text-sm text-muted-foreground">{t('policyRules.loading')}</p> : null}
-            {!isLoading && reviewRules.length === 0 ? (
-              <p className="p-4 text-sm text-muted-foreground">{PAGE_COPY.noDraftRules}</p>
-            ) : null}
-
-            {reviewRules.length > 0 ? (
-              <div className="max-h-[48rem] divide-y divide-border/70 overflow-y-auto">
-                {reviewRules.map((rule) => {
-                  const reviewAnalysis = reviewAnalysisById[rule.id]
-
-                  return (
-                  <article key={rule.id} className="grid gap-3 px-4 py-3 min-[1100px]:grid-cols-[minmax(0,1fr)_11rem]">
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-mono text-xs text-muted-foreground">{rule.rule_code}</span>
-                        <RuleStatusPill status={rule.status} />
-                        <SeverityPill severity={rule.severity} />
-                        {reviewAnalysis?.autoAcceptable ? <RecommendedPill /> : null}
-                        <span className="status-chip bg-muted text-muted-foreground">
-                          {formatSourceType(rule.source_type)}
-                        </span>
-                      </div>
-                      <h2 className="mt-2 text-base font-semibold text-foreground">{rule.name}</h2>
-                      <p className="mt-1 text-sm leading-5 text-muted-foreground">{rule.description}</p>
-                      {rule.source_text ? (
-                        <p className="mt-2.5 text-sm leading-5 text-foreground">{summarizeText(rule.source_text, 180)}</p>
-                      ) : null}
-                      {rule.validation_errors.length > 0 ? (
-                        <ul className="mt-2.5 list-disc space-y-1 pl-4 text-sm text-red-700 dark:text-red-100">
-                          {rule.validation_errors.map((validationError) => (
-                            <li key={validationError}>{validationError}</li>
-                          ))}
-                        </ul>
-                      ) : null}
-                      {reviewAnalysis ? <RuleReviewSignals analysis={reviewAnalysis} /> : null}
-                      <RuleJsonDetails ruleJson={rule.rule_json} />
-                    </div>
-                    <div className="flex flex-wrap items-start justify-start gap-2 min-[1100px]:flex-col min-[1100px]:items-stretch">
-                      <Button type="button" size="sm" variant="outline" onClick={() => runRuleTest(rule)}>
-                        <PlayCircle className="size-4" aria-hidden="true" />
-                        {t('policyRules.test')}
-                      </Button>
-                      {rule.status === 'active' ? (
-                        <Button type="button" size="sm" variant="outline" onClick={() => disableRule(rule)}>
-                          <ToggleLeft className="size-4" aria-hidden="true" />
-                          {t('policyRules.disable')}
-                        </Button>
-                      ) : (
-                        <Button type="button" size="sm" onClick={() => activateRule(rule)}>
-                          <ToggleRight className="size-4" aria-hidden="true" />
-                          {PAGE_COPY.activateOverride}
-                        </Button>
-                      )}
-                    </div>
-                  </article>
-                  )
-                })}
-              </div>
-            ) : null}
-          </section>
-        </div>
-
-        <aside className="grid gap-4">
-          <section className="surface-panel overflow-hidden">
             <div className="flex items-start gap-3 border-b border-border/70 p-4">
               <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
                 <FileText className="size-4" aria-hidden="true" />
@@ -930,9 +841,9 @@ export function PolicyRulesPage() {
             {activeRules.length === 0 ? (
               <p className="p-4 text-sm text-muted-foreground">{PAGE_COPY.noActiveRules}</p>
             ) : (
-              <div className="max-h-[36rem] divide-y divide-border/70 overflow-y-auto">
+              <div className="max-h-[28rem] divide-y divide-border/70 overflow-y-auto">
                 {activeRules.map((rule) => (
-                  <article key={rule.id} className="grid gap-2.5 px-4 py-3">
+                  <article key={rule.id} className="grid gap-2 px-4 py-3">
                     <div className="min-w-0 grid gap-2">
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="max-w-full break-all font-mono text-xs text-muted-foreground">{rule.rule_code}</span>
@@ -944,12 +855,7 @@ export function PolicyRulesPage() {
                         <p className="mt-1 text-sm leading-5 text-muted-foreground">{rule.description}</p>
                       </div>
                     </div>
-                    <RuleJsonDetails ruleJson={rule.rule_json} />
-                    <div className="flex flex-wrap gap-2">
-                      <Button type="button" size="sm" variant="outline" onClick={() => runRuleTest(rule)}>
-                        <PlayCircle className="size-4" aria-hidden="true" />
-                        {t('policyRules.test')}
-                      </Button>
+                    <div className="flex flex-wrap gap-2 pt-1">
                       <Button type="button" size="sm" variant="outline" onClick={() => disableRule(rule)}>
                         <ToggleLeft className="size-4" aria-hidden="true" />
                         {t('policyRules.disable')}
@@ -968,30 +874,6 @@ export function PolicyRulesPage() {
             <p className="rounded-lg border border-red-300/70 bg-red-100/70 p-3 text-sm text-red-700 dark:border-red-400/30 dark:bg-red-400/10 dark:text-red-100">
               {error}
             </p>
-          ) : null}
-
-          {testResult ? (
-            <section className="surface-panel p-4">
-              <p className="text-sm font-semibold text-foreground">{t('policyRules.testResult')}</p>
-              <p className="mt-1 text-sm text-muted-foreground">
-                {testResult.valid ? t('policyRules.validRule') : t('policyRules.invalidRule')} ·{' '}
-                {t('policyRules.matchedCount').replace('{count}', testResult.matched_count.toLocaleString())}
-              </p>
-              {testResult.validation_errors.length > 0 ? (
-                <ul className="mt-2 max-h-40 list-disc space-y-1 overflow-y-auto pl-4 pr-1 text-sm text-red-700 dark:text-red-100">
-                  {testResult.validation_errors.map((validationError) => (
-                    <li key={validationError}>{validationError}</li>
-                  ))}
-                </ul>
-              ) : null}
-              {testResult.warnings.length > 0 ? (
-                <ul className="mt-2 max-h-40 list-disc space-y-1 overflow-y-auto pl-4 pr-1 text-sm text-muted-foreground">
-                  {testResult.warnings.map((warning) => (
-                    <li key={warning}>{warning}</li>
-                  ))}
-                </ul>
-              ) : null}
-            </section>
           ) : null}
         </aside>
       </section>

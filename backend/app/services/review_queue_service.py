@@ -21,6 +21,7 @@ from app.schemas.review_queue import (
 )
 from app.schemas.risk import RiskSignal
 from app.services.policy_engine import utc_now_iso
+from app.services.review_grouping import annotate_review_clusters, review_group_key_from_transaction, review_group_key_from_values
 from app.services.reviewer_brief_service import compose_reviewer_brief
 
 PAGE_SIZE = 500
@@ -79,7 +80,7 @@ def list_review_queue(
         rows = []
 
     if rows:
-        return [item_from_persisted_row(row) for row in rows]
+        return annotate_review_clusters(item_from_persisted_row(row) for row in rows)
 
     items = build_review_queue_items(limit=max(limit + offset, 500))
     if queue_status:
@@ -88,7 +89,7 @@ def list_review_queue(
         items = [item for item in items if item.review_level == review_level]
     if policy_status:
         items = [item for item in items if item.policy_status == policy_status]
-    return items[offset : offset + limit]
+    return annotate_review_clusters(items[offset : offset + limit])
 
 
 def finalize_review_queue_refresh(
@@ -146,7 +147,7 @@ def build_review_queue_items(
         )
         for transaction in transactions
     ]
-    return sorted(items, key=lambda item: (item.review_priority, item.amount_cad), reverse=True)
+    return annotate_review_clusters(sorted(items, key=lambda item: (item.review_priority, item.amount_cad), reverse=True))
 
 
 def compose_review_queue_item(
@@ -214,6 +215,10 @@ def compose_review_queue_item(
         ai_context=compose_ai_context(policy_status, risk_level, policy_flags, risk_signals),
         reviewer_brief=reviewer_brief,
         next_action=next_action,
+        review_group_key=review_group_key_from_transaction(transaction),
+        review_group_size=1,
+        review_group_total_amount_cad=float(transaction.get("amount_cad") or 0),
+        review_group_transaction_ids=[str(transaction["id"])],
         generated_at=utc_now_iso(),
     )
 
@@ -477,6 +482,17 @@ def item_from_persisted_row(row: dict[str, Any]) -> ReviewQueueItem:
         ai_context=row.get("ai_context"),
         reviewer_brief=ReviewerBrief(**row["reviewer_brief"]) if isinstance(row.get("reviewer_brief"), dict) else None,
         next_action=row.get("next_action") or "No action required.",
+        review_group_key=review_group_key_from_values(
+            transaction_id=str(row.get("transaction_id") or ""),
+            employee_id=str(row.get("employee_id")) if row.get("employee_id") else None,
+            department_id=str(row.get("department_id")) if row.get("department_id") else None,
+            merchant=str(row.get("merchant")) if row.get("merchant") else None,
+            transaction_date=str(row.get("transaction_date")) if row.get("transaction_date") else None,
+            category=str(row.get("category")) if row.get("category") else None,
+        ),
+        review_group_size=1,
+        review_group_total_amount_cad=float(row.get("amount_cad") or 0),
+        review_group_transaction_ids=[str(row["transaction_id"])],
         generated_at=str(row.get("generated_at")) if row.get("generated_at") else None,
     )
 def fetch_transactions(limit: int | None = None) -> list[dict[str, Any]]:

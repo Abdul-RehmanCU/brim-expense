@@ -12,6 +12,18 @@ from app.schemas.insights import InsightPageContext, InsightResultRow
 from app.services.ai_service import parse_strict_json
 
 MAX_SQL_ROWS = 200
+CANONICAL_SQL_ALIASES = {
+    "label": ("label", "name", "title"),
+    "sum_amount_cad": ("sum_amount_cad", "total_spend", "total_amount", "spend_total", "amount_total", "total_cad"),
+    "amount_cad": ("amount_cad", "spend_amount", "amount", "value"),
+    "avg_amount_cad": ("avg_amount_cad", "average_spend", "avg_spend", "average_amount", "avg_amount"),
+    "transaction_count": ("transaction_count", "count", "txn_count", "transactions", "total_transactions"),
+    "month": ("month", "period", "month_label"),
+    "department": ("department", "department_name", "team", "team_name"),
+    "merchant": ("merchant", "merchant_name"),
+    "employee": ("employee", "employee_name", "full_name"),
+    "business_category": ("business_category", "category", "normalized_category"),
+}
 FORBIDDEN_SQL_PATTERNS = (
     r"\binsert\b",
     r"\bupdate\b",
@@ -108,10 +120,11 @@ def execute_read_only_sql(sql_statement: str, limit: int) -> tuple[list[InsightR
             connection.rollback()
 
     result_rows = [row_to_insight_result(row, columns, index) for index, row in enumerate(rows)]
+    normalized_columns = [normalize_sql_result_key(column) for column in columns]
     return result_rows, {
         "record_count": len(result_rows),
         "returned_count": len(result_rows),
-        "sql_columns": columns,
+        "sql_columns": normalized_columns,
         "sql_limit": effective_limit,
     }
 
@@ -199,18 +212,37 @@ def normalize_sql(sql_statement: str) -> str:
 
 
 def row_to_insight_result(row: dict[str, Any], columns: list[str], index: int) -> InsightResultRow:
-    label_key = next((key for key in ("label", "merchant", "employee", "department", "business_category", "month", "transaction_date", "id") if key in row), None)
+    normalized_row = normalize_sql_result_row(row)
+    normalized_columns = [normalize_sql_result_key(column) for column in columns]
+    label_key = next((key for key in ("label", "merchant", "employee", "department", "business_category", "month", "transaction_date", "id") if key in normalized_row), None)
     if label_key is None:
-        label_key = columns[0] if columns else None
-    label = str(row.get(label_key) if label_key else f"Row {index + 1}")
+        label_key = normalized_columns[0] if normalized_columns else None
+    label = str(normalized_row.get(label_key) if label_key else f"Row {index + 1}")
     values = {
         key: value
-        for key, value in row.items()
+        for key, value in normalized_row.items()
         if key != label_key
     }
     if not values and label_key:
-        values[label_key] = row.get(label_key)
+        values[label_key] = normalized_row.get(label_key)
     return InsightResultRow(label=label, values=values)
+
+
+def normalize_sql_result_row(row: dict[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for key, value in row.items():
+        normalized_key = normalize_sql_result_key(key)
+        if normalized_key not in normalized:
+            normalized[normalized_key] = value
+    return normalized
+
+
+def normalize_sql_result_key(key: str) -> str:
+    compact = re.sub(r"[^a-z0-9]+", "_", str(key).strip().lower()).strip("_")
+    for canonical, aliases in CANONICAL_SQL_ALIASES.items():
+        if compact == canonical or compact in aliases:
+            return canonical
+    return compact
 
 
 def allowed_sql_schema_context() -> dict[str, list[str]]:

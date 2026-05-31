@@ -62,10 +62,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   const [lastExternalPageContext, setLastExternalPageContext] = useState<AssistantPageContext | null>(null)
 
   const selectedResult = useMemo(
-    () =>
-      conversation.find((turn) => turn.id === selectedAssistantTurnId && turn.role === 'assistant')?.result ??
-      [...conversation].reverse().find((turn) => turn.role === 'assistant')?.result ??
-      null,
+    () => conversation.find((turn) => turn.id === selectedAssistantTurnId && turn.role === 'assistant')?.result ?? null,
     [conversation, selectedAssistantTurnId],
   )
 
@@ -172,6 +169,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     setIsAsking(true)
     setError(null)
     setDockState((current) => (current === 'closed' ? 'open' : current))
+    setSelectedAssistantTurnId(null)
 
     try {
       const sessionId = await ensureSession(trimmedQuestion)
@@ -286,7 +284,7 @@ export function useAssistantPageContext(context: AssistantPageContext) {
 }
 
 function serializePageContext(pageContext: AssistantPageContext | null, fallbackContext: AssistantPageContext | null = null) {
-  const contextToSerialize = pageContext?.routeId === 'talkToData' && fallbackContext ? fallbackContext : pageContext
+  const contextToSerialize = pageContext
 
   if (!contextToSerialize) {
     return null
@@ -314,6 +312,17 @@ function serializePageContext(pageContext: AssistantPageContext | null, fallback
 
   if (contextToSerialize.details) {
     payload.details = contextToSerialize.details
+  }
+
+  if (contextToSerialize.routeId === 'talkToData' && fallbackContext) {
+    payload.related_context = {
+      page: fallbackContext.title,
+      route: fallbackContext.routeId,
+      summary: fallbackContext.summary,
+      filters: fallbackContext.filters ?? {},
+      metrics: fallbackContext.metrics ?? {},
+      focus: fallbackContext.focus ?? null,
+    }
   }
 
   return {

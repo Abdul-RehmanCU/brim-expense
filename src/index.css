@@ -210,9 +210,67 @@ body {
 
   .ambient-spotlight {
     background:
-      radial-gradient(circle at var(--pointer-x) var(--pointer-y), rgba(120, 255, 231, 0.16), transparent 17rem),
+      radial-gradient(circle at var(--pointer-x) var(--pointer-y), rgba(120, 255, 231, 0.18), transparent 15rem),
+      radial-gradient(circle at var(--pointer-trail-x) var(--pointer-trail-y), rgba(111, 176, 255, 0.12), transparent 13rem),
       radial-gradient(circle at calc(var(--pointer-x) - 14%) calc(var(--pointer-y) + 18%), rgba(255, 210, 120, 0.1), transparent 15rem);
     transition: background 180ms linear;
+  }
+
+  .ambient-tech-lines {
+    background:
+      linear-gradient(
+        115deg,
+        transparent 0%,
+        transparent 40%,
+        color-mix(in oklch, var(--primary), transparent 90%) 48%,
+        color-mix(in oklch, var(--chart-3), transparent 88%) 51%,
+        transparent 59%,
+        transparent 100%
+      ),
+      linear-gradient(
+        90deg,
+        transparent 0%,
+        color-mix(in oklch, var(--primary), transparent 92%) 46%,
+        color-mix(in oklch, var(--accent), transparent 93%) 49%,
+        transparent 53%,
+        transparent 100%
+      );
+    mix-blend-mode: screen;
+    opacity: 0.48;
+    transform:
+      translate3d(
+        calc((var(--pointer-x-unit) - 50) * 0.08px),
+        calc((var(--pointer-y-unit) - 50) * -0.06px),
+        0
+      );
+    transition: transform 140ms linear;
+  }
+
+  .ambient-neural {
+    background:
+      radial-gradient(circle at var(--pointer-x) var(--pointer-y), rgba(115, 255, 224, 0.24) 0, transparent 2.2rem),
+      radial-gradient(circle at var(--pointer-x) var(--pointer-y), transparent 2.2rem, rgba(115, 255, 224, 0.28) 2.35rem, transparent 2.7rem),
+      radial-gradient(circle at var(--pointer-trail-x) var(--pointer-trail-y), rgba(114, 171, 255, 0.18) 0, transparent 2rem),
+      linear-gradient(
+        135deg,
+        transparent 0%,
+        transparent 43%,
+        color-mix(in oklch, var(--primary), transparent 88%) 49%,
+        transparent 55%,
+        transparent 100%
+      );
+    filter: saturate(1.08);
+    mix-blend-mode: screen;
+    opacity: 0.72;
+    transition: background 140ms linear;
+  }
+
+  .ambient-pointer-ring {
+    background:
+      radial-gradient(circle at var(--pointer-x) var(--pointer-y), transparent 0 3.3rem, rgba(116, 255, 230, 0.22) 3.4rem, transparent 3.9rem),
+      radial-gradient(circle at var(--pointer-trail-x) var(--pointer-trail-y), transparent 0 2.2rem, rgba(121, 176, 255, 0.16) 2.3rem, transparent 2.7rem);
+    opacity: 0.9;
+    transition: background 130ms linear;
   }
 
   .ambient-orb {
@@ -269,6 +327,78 @@ body {
     animation: panel-rise 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
   }
 
+  .route-fade-in {
+    animation: route-fade 380ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .assistant-bubble-enter {
+    animation: assistant-bubble-rise 460ms cubic-bezier(0.2, 0.9, 0.25, 1) both;
+  }
+
+  .assistant-dock-enter {
+    animation: assistant-dock-rise 280ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .assistant-avatar-reveal {
+    animation: assistant-avatar-pop 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .nav-pill {
+    position: relative;
+    transform: translate3d(0, 0, 0);
+    transition:
+      background-color 180ms ease-out,
+      color 180ms ease-out,
+      box-shadow 220ms ease-out,
+      transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+    will-change: transform;
+  }
+
+  .nav-pill::after {
+    background: linear-gradient(90deg, color-mix(in oklch, var(--sidebar-primary), white 8%), transparent 72%);
+    border-radius: inherit;
+    content: '';
+    inset: 0;
+    opacity: 0;
+    pointer-events: none;
+    position: absolute;
+    transition: opacity 180ms ease-out;
+  }
+
+  .nav-pill:hover {
+    background: color-mix(in oklch, var(--sidebar-accent), transparent 18%);
+    color: var(--sidebar-accent-foreground);
+    transform: translate3d(0, -1px, 0);
+  }
+
+  .nav-pill:hover::after,
+  .nav-pill-active::after {
+    opacity: 0.14;
+  }
+
+  .nav-pill-active {
+    transform: translate3d(0, 0, 0);
+  }
+
+  .nav-pill-mobile {
+    transform: translate3d(0, 0, 0);
+    transition:
+      background-color 180ms ease-out,
+      color 180ms ease-out,
+      box-shadow 220ms ease-out,
+      transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+    will-change: transform;
+  }
+
+  .nav-pill-mobile:hover {
+    color: var(--foreground);
+    transform: translate3d(0, -1px, 0);
+  }
+
+  .nav-pill-mobile-active {
+    box-shadow: 0 16px 34px -24px color-mix(in oklch, var(--primary), black 54%);
+  }
+
   .chart-tooltip {
     @apply min-w-44 rounded-2xl border border-border/80 bg-card/96 px-3 py-2.5 text-xs shadow-[0_22px_55px_-34px_rgba(15,23,42,0.72)] backdrop-blur-xl;
   }
@@ -307,5 +437,72 @@ body {
   100% {
     opacity: 1;
     transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes route-fade {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 12px, 0);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes assistant-bubble-rise {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 18px, 0) scale(0.88);
+  }
+  70% {
+    opacity: 1;
+    transform: translate3d(0, -2px, 0) scale(1.03);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes assistant-dock-rise {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 14px, 0) scale(0.97);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes assistant-avatar-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.82) rotate(-10deg);
+    filter: saturate(0.85);
+  }
+  55% {
+    opacity: 1;
+    transform: scale(1.06) rotate(2deg);
+    filter: saturate(1);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) rotate(0deg);
+    filter: saturate(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .route-fade-in,
+  .assistant-bubble-enter,
+  .assistant-dock-enter,
+  .assistant-avatar-reveal,
+  .nav-pill,
+  .nav-pill-mobile {
+    animation: none !important;
+    transition: none !important;
   }
 }

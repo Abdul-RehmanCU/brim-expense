@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Query
 
 from app.schemas.approvals import (
+    ApprovalExplanation,
     ApprovalDecisionRequest,
     ApprovalListResponse,
     ApprovalRequestCreate,
@@ -11,6 +12,7 @@ from app.services.approvals_service import (
     create_approval_request,
     decide_approval,
     get_approval,
+    get_approval_explanation,
     get_approvals_status,
     list_approvals,
 )
@@ -40,6 +42,11 @@ def approvals_create(request: ApprovalRequestCreate) -> ApprovalRequestDetail:
 @router.get("/{approval_id}", response_model=ApprovalRequestDetail)
 def approvals_detail(approval_id: str) -> ApprovalRequestDetail:
     return get_approval(approval_id)
+
+
+@router.get("/{approval_id}/explanation", response_model=ApprovalExplanation)
+def approvals_explanation(approval_id: str) -> ApprovalExplanation:
+    return get_approval_explanation(approval_id)
 
 
 @router.post("/{approval_id}/decision", response_model=ApprovalRequestDetail)

@@ -12,11 +12,10 @@ The primary demo remains:
 8. App answers using safe follow-up context.
 9. User runs compliance scan.
 10. App flags missing receipts, missing preapprovals, restricted alcohol, fines/tickets, and needs-context items.
-11. User opens Risk Radar and reviews split or duplicate signals.
-12. User creates an approval request.
-13. AI recommends approve or deny using persisted policy, risk, budget, readiness, citation, and history facts.
-14. User generates Sarah Chen's synthetic Marketing expense report.
-15. Report shows line items, policy flags, risk flags, workflow metrics, citations, visuals, approval/readiness context, summary, and CSV export.
+11. User creates an approval request.
+12. AI recommends approve or deny using persisted policy, risk, budget, readiness, citation, and history facts.
+13. User generates Sarah Chen's synthetic Marketing expense report.
+14. Report shows line items, policy flags, risk flags, workflow metrics, citations, visuals, approval/readiness context, summary, and CSV export.
 
 ## Hero Scenario
 

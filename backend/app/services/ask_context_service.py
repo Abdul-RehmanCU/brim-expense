@@ -62,8 +62,9 @@ def execute_context_summary_tool(
     ask_context: AskContextEnvelope,
     question: str,
 ) -> tuple[list[InsightResultRow], dict[str, Any], list[Any]]:
-    summary_keys = [str(key) for key in plan.context_options.get("summary_keys") or []]
-    if not summary_keys:
+    raw_summary_keys = plan.context_options.get("summary_keys")
+    summary_keys = [str(key) for key in raw_summary_keys] if isinstance(raw_summary_keys, list) else []
+    if raw_summary_keys is None and not summary_keys:
         summary_keys = infer_summary_keys(question)
 
     rows: list[InsightResultRow] = []
